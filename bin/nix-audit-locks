@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# nix-audit-locks <flake-dir> <repo-dir>... — compare <flake-dir>/flake.lock's
+# pinned revisions against the current git HEAD of each given local repo
+# directory (matched by basename against the flake's input names). Reports
+# drift — useful when local sibling repos are flake inputs and you want to
+# know if the lockfile still reflects what's actually on disk.
+set -euo pipefail
+
+if [ $# -lt 2 ]; then
+    echo "usage: nix-audit-locks <flake-dir> <repo-dir>..." >&2
+    exit 1
+fi
+
+# Resolve to an absolute path — a bare relative name like "nix-config" is
+# parsed by `nix flake metadata` as a flake-registry shorthand, not a path,
+# and fails with "cannot find flake 'flake:nix-config'".
+flake_dir=$(realpath "$1")
+shift
+
+LOCKS=$(nix flake metadata --json "$flake_dir" | jq -c '.locks.nodes')
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+RED='\033[1;31m'
+RESET='\033[0m'
+
+drift_count=0
+for dir in "$@"; do
+    [ -d "$dir/.git" ] || continue
+    name=$(basename "$dir")
+
+    locked=$(echo "$LOCKS" | jq -r --arg n "$name" '.[$n].locked.rev // empty')
+    if [ -z "$locked" ]; then
+        printf "  %-20s %b(no lock entry — not a flake input?)%b\n" "$name" "$YELLOW" "$RESET"
+        continue
+    fi
+
+    current=$(git -C "$dir" rev-parse HEAD)
+    if [ "$locked" = "$current" ]; then
+        printf "  %-20s %b✓ in sync%b  (%s)\n" "$name" "$GREEN" "$RESET" "${locked:0:12}"
+    else
+        printf "  %-20s %b⚠ DRIFT%b\n" "$name" "$RED" "$RESET"
+        printf "    lock:  %s\n" "${locked:0:12}"
+        printf "    head:  %s\n" "${current:0:12}"
+        drift_count=$((drift_count + 1))
+    fi
+done
+
+if [ "$drift_count" -gt 0 ]; then
+    echo
+    echo "ℹ  $drift_count drift(s) detected — update the lockfile to sync."
+    exit 1
+fi

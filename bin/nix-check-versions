@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# nix-check-versions [dir] — detect version-pinning drift across a Nix
+# repo: the same package pinned to different versions in different files.
+# Matches any `<name>Version = "..."` assignment (e.g. platformToolsVersion,
+# cmdLineToolsVersion) — not tied to any particular naming scheme.
+set -euo pipefail
+
+dir="${1:-.}"
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+
+# -o isolates just the "<name>Version = \"...\"" token per match, so the
+# per-line parsing below starts right at the identifier — no leading text
+# for a greedy `.*` to eat into (that bug — a leading `.*([a-zA-Z]+)Version`
+# capturing only the last letter before "Version" — is why this needed
+# fixing rather than a straight port).
+grep -rEo '[a-zA-Z]+Version\s*=\s*"[0-9][^"]*"' "$dir" --include="*.nix" 2>/dev/null > "$tmp" || true
+
+if [ ! -s "$tmp" ]; then
+    exit 0
+fi
+
+declare -A versions
+drift_found=0
+
+while IFS=: read -r file assignment; do
+    package=$(echo "$assignment" | sed -E 's/([a-zA-Z]+)Version.*/\1/')
+    version=$(echo "$assignment" | sed -E 's/.*"([^"]+)".*/\1/')
+
+    [ -z "$package" ] || [ -z "$version" ] && continue
+
+    if [ -v "versions[$package]" ] && [ "${versions[$package]}" != "$version" ]; then
+        if [ "$drift_found" -eq 0 ]; then
+            echo "❌ Version pinning drift detected:"
+            echo
+            drift_found=1
+        fi
+        echo "  Package: $package"
+        echo "    Pinned to ${versions[$package]} in: (earlier occurrence)"
+        echo "    Pinned to $version in: $file"
+        echo
+    else
+        versions[$package]=$version
+    fi
+done < "$tmp"
+
+if [ "$drift_found" -eq 1 ]; then
+    echo "⚠️  Please update all occurrences to use the same version."
+    exit 1
+fi
+
+exit 0
