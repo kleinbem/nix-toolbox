@@ -15,7 +15,8 @@
 #   1. every changed pkgs/by-name package's meta.position points into its own
 #      directory (a bare `.override` variant keeps the base package's position,
 #      so nixpkgs-update never sees its `# nixpkgs-update: no auto update`);
-#   2. changed NixOS module docs link options with {option}`…`, not [](#opt-…);
+#   2. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
+#      plain code, only [](#opt-…) becomes a link (a note, both forms are allowed);
 #   3. comments that announce a workaround ("fixed upstream", "drop with", …)
 #      carry a link in the same comment block.
 # Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
@@ -75,17 +76,17 @@ for attr in $ATTRS; do
     esac
 done
 
-echo "== option links in changed module docs"
+echo "== option references in changed module docs"
 DOCS=$(printf '%s\n' "$CHANGED" | grep -E '^nixos/modules/.*\.md$' || true)
 if [ -z "$DOCS" ]; then
     note "no module docs changed"
 fi
 for doc in $DOCS; do
     [ -f "$doc" ] || continue
-    hits=$(grep -n '](#opt-' "$doc" || true)
+    hits=$(grep -n '{option}`' "$doc" || true)
     if [ -n "$hits" ]; then
         while IFS= read -r line; do
-            fail "$doc:${line%%:*}: use {option}\`…\` instead of [](#opt-…)"
+            note "$doc:${line%%:*}: {option}\`…\` is plain code, not a link; [](#opt-…) links"
         done <<<"$hits"
     else
         ok "$doc"
