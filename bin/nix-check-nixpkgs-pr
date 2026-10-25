@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# nix-check-nixpkgs-pr [options] [nixpkgs-dir] — mechanical checks for a nixpkgs PR branch
+# before it is marked ready. Builds and tests don't catch these.
+#
+#   --base <rev>        compare against this revision (default: merge-base with
+#                       upstream/master, else origin/master)
+#   --log <file>        group the warnings in a build log (repeatable)
+#   --drvs-against <rev>
+#                       instantiate the changed attributes at <rev> too and say
+#                       whether their derivations changed (so tests must rerun)
+#   --attr <attr>       extra attribute for --drvs-against, e.g. nixosTests.foo
+#                       (repeatable)
+#
+# Checks:
+#   1. every changed pkgs/by-name package's meta.position points into its own
+#      directory (a bare `.override` variant keeps the base package's position,
+#      so nixpkgs-update never sees its `# nixpkgs-update: no auto update`);
+#   2. changed NixOS module docs link options with {option}`…`, not [](#opt-…);
+#   3. comments that announce a workaround ("fixed upstream", "drop with", …)
+#      carry a link in the same comment block.
+# Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
+set -euo pipefail
+
+BASE=""
+LOGS=()
+AGAINST=""
+EXTRA_ATTRS=()
+DIR="."
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --base) BASE="$2"; shift 2 ;;
+    --log) LOGS+=("$2"); shift 2 ;;
+    --drvs-against) AGAINST="$2"; shift 2 ;;
+    --attr) EXTRA_ATTRS+=("$2"); shift 2 ;;
+    -h | --help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) DIR="$1"; shift ;;
+    esac
+done
+cd "$DIR"
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+if [ -z "$BASE" ]; then
+    for ref in upstream/master origin/master master; do
+        if git rev-parse -q --verify "$ref" >/dev/null; then
+            BASE=$(git merge-base HEAD "$ref")
+            break
+        fi
+    done
+fi
+[ -n "$BASE" ] || { echo "no base revision found; pass --base" >&2; exit 2; }
+
+FAILED=0
+fail() { FAILED=1; printf '  ✗ %s\n' "$*"; }
+ok() { printf '  ✓ %s\n' "$*"; }
+note() { printf '  · %s\n' "$*"; }
+
+CHANGED=$(git diff --name-only "$BASE" HEAD)
+# Package attributes from changed by-name directories (pkgs/by-name/xx/<attr>/…).
+ATTRS=$(printf '%s\n' "$CHANGED" | sed -nE 's#^pkgs/by-name/[^/]+/([^/]+)/.*#\1#p' | sort -u)
+
+echo "== meta.position of changed packages (base ${BASE:0:12})"
+if [ -z "$ATTRS" ]; then
+    note "no pkgs/by-name changes"
+fi
+for attr in $ATTRS; do
+    [ -f "pkgs/by-name/${attr:0:2}/$attr/package.nix" ] || continue
+    pos=$(NIXPKGS_ALLOW_UNFREE=1 NIXPKGS_ALLOW_INSECURE=1 \
+        nix-instantiate --eval --strict -A "$attr.meta.position" 2>/dev/null | tr -d '"' || true)
+    file=${pos%:*}
+    case "$file" in
+    "") note "$attr: no meta.position (doesn't evaluate here?)" ;;
+    "$ROOT/pkgs/by-name/${attr:0:2}/$attr/"*) ok "$attr" ;;
+    *) fail "$attr: meta.position is ${file#"$ROOT/"}; re-anchor it in its own file (see llama-cpp-vulkan)" ;;
+    esac
+done
+
+echo "== option links in changed module docs"
+DOCS=$(printf '%s\n' "$CHANGED" | grep -E '^nixos/modules/.*\.md$' || true)
+if [ -z "$DOCS" ]; then
+    note "no module docs changed"
+fi
+for doc in $DOCS; do
+    [ -f "$doc" ] || continue
+    hits=$(grep -n '](#opt-' "$doc" || true)
+    if [ -n "$hits" ]; then
+        while IFS= read -r line; do
+            fail "$doc:${line%%:*}: use {option}\`…\` instead of [](#opt-…)"
+        done <<<"$hits"
+    else
+        ok "$doc"
+    fi
+done
+
+echo "== workaround comments carry a link"
+NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
+found=0
+for f in $NIXFILES; do
+    [ -f "$f" ] || continue
+    # Comment blocks: runs of lines whose first non-blank character is '#'.
+    out=$(awk -v file="$f" '
+        function flush() {
+            if (block != "" && tolower(block) ~ /(fixed upstream|drop (it |this |them )?with|workaround|until upstream|a pr will follow)/ && block !~ /https?:\/\//)
+                printf "%s:%d: workaround comment without a link\n", file, start
+            block = ""
+        }
+        /^[[:space:]]*#/ { if (block == "") start = NR; block = block " " $0; next }
+        { flush() }
+        END { flush() }
+    ' "$f")
+    if [ -n "$out" ]; then
+        while IFS= read -r line; do fail "$line"; done <<<"$out"
+        found=1
+    fi
+    links=$(grep -ohE 'https://github\.com/[^/ ]+/[^/ ]+/(pull|issues)/[0-9]+' "$f" || true)
+    if [ -n "$links" ] && command -v gh >/dev/null; then
+        for url in $(printf '%s\n' "$links" | sort -u); do
+            state=$(gh pr view "$url" --json state --jq .state 2>/dev/null ||
+                gh issue view "$url" --json state --jq .state 2>/dev/null || echo "?")
+            case "$state" in
+            MERGED | CLOSED) note "$f: $url is $state; drop the workaround with the release that has it" ;;
+            esac
+        done
+    fi
+done
+[ "$found" -eq 0 ] && ok "every workaround comment in the changed .nix files has a link"
+
+if [ ${#LOGS[@]} -gt 0 ]; then
+    echo "== warnings in build logs (grouped; sort them into ours, harmless, upstream)"
+    for log in "${LOGS[@]}"; do
+        echo "-- $log"
+        grep -iE 'warning' "$log" |
+            sed -E 's/^[0-9]{4}-[0-9-]+T[0-9:.]+Z //; s#/nix/store/[a-z0-9]{32}-#/nix/store/…-#g; s/[0-9]+/N/g' |
+            cut -c1-160 | sort | uniq -c | sort -rn | head -40
+    done
+fi
+
+if [ -n "$AGAINST" ]; then
+    echo "== derivations at HEAD vs ${AGAINST:0:12}"
+    tmp=$(mktemp -d)
+    trap 'git worktree remove --force "$tmp/wt" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+    git worktree add -q --detach "$tmp/wt" "$AGAINST"
+    for attr in $ATTRS "${EXTRA_ATTRS[@]}"; do
+        a=$(NIXPKGS_ALLOW_UNFREE=1 nix-instantiate "$tmp/wt" -A "$attr" 2>/dev/null | head -1 || true)
+        b=$(NIXPKGS_ALLOW_UNFREE=1 nix-instantiate . -A "$attr" 2>/dev/null | head -1 || true)
+        if [ -z "$a" ] || [ -z "$b" ]; then
+            note "$attr: doesn't evaluate on both sides"
+        elif [ "$a" = "$b" ]; then
+            ok "$attr: unchanged"
+        else
+            note "$attr: changed ($(basename "$a") → $(basename "$b")); its tests must run again"
+        fi
+    done
+fi
+
+echo
+if [ "$FAILED" -eq 0 ]; then echo "✅ no failures"; else echo "❌ fix the ✗ items"; fi
+exit "$FAILED"
