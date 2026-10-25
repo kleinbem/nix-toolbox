@@ -18,7 +18,9 @@
 #   2. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
 #      plain code, only [](#opt-…) becomes a link (a note, both forms are allowed);
 #   3. comments that announce a workaround ("fixed upstream", "drop with", …)
-#      carry a link in the same comment block.
+#      carry a link in the same comment block;
+#   4. new .nix files have no unused arguments or bindings (deadnix, if installed;
+#      modified files are skipped, their old code isn't the PR's).
 # Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
 set -euo pipefail
 
@@ -125,6 +127,22 @@ for f in $NIXFILES; do
     fi
 done
 [ "$found" -eq 0 ] && ok "every workaround comment in the changed .nix files has a link"
+
+echo "== unused arguments and bindings in new .nix files"
+NEWNIX=$(git diff --name-only --diff-filter=A "$BASE" HEAD | grep -E '\.nix$' || true)
+if ! command -v deadnix >/dev/null; then
+    note "deadnix not installed, skipped"
+elif [ -z "$NEWNIX" ]; then
+    note "no new .nix files"
+else
+    for f in $NEWNIX; do
+        if deadnix --fail -q "$f" >/dev/null 2>&1; then
+            ok "$f"
+        else
+            fail "$f: $(deadnix -o json "$f" 2>/dev/null | jq -r '[.results[]|"\(.line):\(.message)"]|join("; ")')"
+        fi
+    done
+fi
 
 if [ ${#LOGS[@]} -gt 0 ]; then
     echo "== warnings in build logs (grouped; sort them into ours, harmless, upstream)"

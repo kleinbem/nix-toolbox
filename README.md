@@ -12,7 +12,7 @@ Put `bin/` on `PATH` to use these directly.
 | `nix-audit-deps [repo-path] [old-lock-file]` | Audit transitive dependency version changes via `flake.lock` — flags major version bumps in common C libraries (override the watch list with `WATCH_PACKAGES`) |
 | `nix-audit-locks <flake-dir> <repo-dir>...` | Compare a flake's locked input revisions against the actual git HEAD of local sibling repos, report drift |
 | `nix-verify-devshells [flake-ref]` | Build every devShell a flake defines (introspected, not hardcoded) for the current system, report pass/fail per shell |
-| `nix-check-nixpkgs-pr [--base rev] [--log file] [--drvs-against rev] [dir]` | Mechanical checks for a nixpkgs PR branch before ready: variants' `meta.position` in their own file, option links in module docs (notes `{option}`, which renders without a link), a link on every workaround comment (state via `gh` if present); optionally groups a build log's warnings and tells which derivations changed since a revision |
+| `nix-check-nixpkgs-pr [--base rev] [--log file] [--drvs-against rev] [dir]` | Mechanical checks for a nixpkgs PR branch before ready: variants' `meta.position` in their own file, option links in module docs (notes `{option}`, which renders without a link), a link on every workaround comment (state via `gh` if present), no unused arguments in new files (deadnix, if installed); optionally groups a build log's warnings and tells which derivations changed since a revision |
 | `nix-check-lock [lock-path] [pgrep-pattern]` | Inspect a flock file used to serialize long-running builds — is it held, and by what |
 | `bash-test-lib.sh` | Sourced (not executed) — hand-rolled `assert_eq`/`assert_empty`/`test_summary` bash test helpers |
 
