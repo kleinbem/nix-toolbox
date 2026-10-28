@@ -29,7 +29,11 @@ LOGS=()
 AGAINST=""
 EXTRA_ATTRS=()
 DIR="."
+need_value() { [ $# -ge 2 ] || { echo "$1 needs a value, see --help" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
+    case "$1" in
+    --base | --log | --drvs-against | --attr) need_value "$@" ;;
+    esac
     case "$1" in
     --base) BASE="$2"; shift 2 ;;
     --log) LOGS+=("$2"); shift 2 ;;
