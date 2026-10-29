@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # nix-check-nixpkgs-pr [options] [nixpkgs-dir] — mechanical checks for a nixpkgs PR branch
-# before it is marked ready. Builds and tests don't catch these.
+# before it is marked ready, or for reviewing an open PR. Builds and tests don't catch these.
 #
+#   --pr <number|url>   fetch and check this GitHub pull request in a temporary worktree
 #   --base <rev>        compare against this revision (default: merge-base with
 #                       upstream/master, else origin/master)
 #   --log <file>        group the warnings in a build log (repeatable)
@@ -20,7 +21,10 @@
 #   3. comments that announce a workaround ("fixed upstream", "drop with", …)
 #      carry a link in the same comment block;
 #   4. new .nix files have no unused arguments or bindings (deadnix, if installed;
-#      modified files are skipped, their old code isn't the PR's).
+#      modified files are skipped, their old code isn't the PR's);
+#   5. statix lint checks on changed .nix files (if installed);
+#   6. common review anti-patterns: legacy python format, rev vs tag in fetchFromGitHub,
+#      unexplained doCheck = false, invalid maintainer emails.
 # Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
 set -euo pipefail
 
@@ -29,23 +33,53 @@ LOGS=()
 AGAINST=""
 EXTRA_ATTRS=()
 DIR="."
+PR=""
 need_value() { [ $# -ge 2 ] || { echo "$1 needs a value, see --help" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
-    --base | --log | --drvs-against | --attr) need_value "$@" ;;
+    --base | --log | --drvs-against | --attr | --pr) need_value "$@" ;;
     esac
     case "$1" in
+    --pr) PR="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --log) LOGS+=("$2"); shift 2 ;;
     --drvs-against) AGAINST="$2"; shift 2 ;;
     --attr) EXTRA_ATTRS+=("$2"); shift 2 ;;
-    -h | --help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) DIR="$1"; shift ;;
     esac
 done
 cd "$DIR"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
+
+if [ -n "$PR" ]; then
+    PR_NUM=$(printf '%s' "$PR" | grep -oE '[0-9]+$' || true)
+    [ -n "$PR_NUM" ] || { echo "--pr needs a PR number or GitHub PR URL" >&2; exit 2; }
+    REMOTE="upstream"
+    if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
+        REMOTE="origin"
+    fi
+    echo "== fetching PR #$PR_NUM from $REMOTE"
+    git fetch -q "$REMOTE" "pull/$PR_NUM/head"
+    PR_HEAD=$(git rev-parse FETCH_HEAD)
+
+    if [ -z "$BASE" ]; then
+        for ref in upstream/master origin/master master; do
+            if git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
+                BASE=$(git merge-base "$PR_HEAD" "$ref")
+                break
+            fi
+        done
+    fi
+    [ -n "$BASE" ] || { echo "no base revision found for PR #$PR_NUM; pass --base" >&2; exit 2; }
+
+    tmp_wt=$(mktemp -d)
+    trap 'git worktree remove --force "$tmp_wt/wt" >/dev/null 2>&1 || true; rm -rf "$tmp_wt"' EXIT
+    git worktree add -q --detach "$tmp_wt/wt" "$PR_HEAD"
+    cd "$tmp_wt/wt"
+    ROOT="$tmp_wt/wt"
+fi
 
 if [ -z "$BASE" ]; then
     for ref in upstream/master origin/master master; do
@@ -146,6 +180,71 @@ else
             fail "$f: $(deadnix -o json "$f" 2>/dev/null | jq -r '[.results[]|"\(.line):\(.message)"]|join("; ")')"
         fi
     done
+fi
+
+if command -v statix >/dev/null; then
+    echo "== statix check on new .nix files"
+    if [ -z "$NEWNIX" ]; then
+        note "no new .nix files"
+    else
+        for f in $NEWNIX; do
+            [ -f "$f" ] || continue
+            sout=$(statix check "$f" 2>&1 || true)
+            if [ -n "$sout" ]; then
+                note "$f has statix suggestions:"
+                printf '%s\n' "$sout" | sed 's/^/    /'
+            else
+                ok "$f"
+            fi
+        done
+    fi
+fi
+
+echo "== common derivation review patterns"
+if [ -z "$NIXFILES" ]; then
+    note "no .nix files changed"
+else
+    for f in $NIXFILES; do
+        [ -f "$f" ] || continue
+        # Legacy format = "setuptools" or "pyproject"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            note "$f:${line%%:*}: format = \"...\" is legacy; prefer pyproject = true;"
+        done < <(grep -nE 'format\s*=\s*"(setuptools|pyproject)"' "$f" || true)
+
+        # GitHub tag fetcher using rev = "v..."
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            note "$f:${line%%:*}: uses rev = \"v...\"; prefer tag = \"v...\" for GitHub releases/tags"
+        done < <(grep -nE 'rev\s*=\s*"v\$\{' "$f" || true)
+
+        # doCheck = false without explanatory comment
+        comment_re='^[[:space:]]*#'
+        inline_comment_re='#[[:space:]]*[^[:space:]]'
+        while IFS= read -r lnum; do
+            [ -n "$lnum" ] || continue
+            prev_line=$(sed -n "$((lnum - 1))p" "$f" 2>/dev/null || true)
+            curr_line=$(sed -n "${lnum}p" "$f")
+            if [[ ! "$curr_line" =~ $inline_comment_re ]] && [[ ! "$prev_line" =~ $comment_re ]]; then
+                note "$f:$lnum: doCheck = false without an explanatory comment"
+            fi
+        done < <(grep -nE '^[[:space:]]*doCheck\s*=\s*false;' "$f" | cut -d: -f1 || true)
+    done
+fi
+
+if printf '%s\n' "$CHANGED" | grep -qx "maintainers/maintainer-list.nix"; then
+    echo "== maintainer list email format"
+    added_emails=$(git diff "$BASE" HEAD -- maintainers/maintainer-list.nix | grep -E '^\+[[:space:]]*email\s*=' || true)
+    if [ -n "$added_emails" ]; then
+        while IFS= read -r eline; do
+            val=$(printf '%s\n' "$eline" | sed -E 's/^\+[[:space:]]*email\s*=\s*"([^"]+)";/\1/')
+            if [[ "$val" != *"@"* ]]; then
+                fail "maintainers/maintainer-list.nix: added email '$val' is not a valid email address (omit or fix)"
+            else
+                ok "maintainers/maintainer-list.nix: email '$val' is valid"
+            fi
+        done <<<"$added_emails"
+    fi
 fi
 
 if [ ${#LOGS[@]} -gt 0 ]; then
