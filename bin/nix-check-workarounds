@@ -41,15 +41,19 @@ fi
 cd "$DIR"
 cd "$(git rev-parse --show-toplevel)"
 
-files=()
+list=$(mktemp)
+trap 'rm -f "$list"' EXIT
 if [ -n "$BASE" ]; then
     git rev-parse -q --verify "$BASE^{commit}" >/dev/null || { echo "--base: unknown revision $BASE" >&2; exit 2; }
-    mapfile -d '' files < <(git diff -z --name-only --diff-filter=d "$BASE" -- "${PATHSPEC[@]}")
+    git diff -z --name-only --diff-filter=d "$BASE" -- "${PATHSPEC[@]}" >"$list" || exit 2
 else
-    mapfile -d '' files < <(git ls-files -z -- "${PATHSPEC[@]}")
+    git ls-files -z -- "${PATHSPEC[@]}" >"$list" || exit 2
 fi
+files=()
+mapfile -d '' files <"$list"
 
-# One line per workaround comment: "<file>\t<line>\t<links, space-separated>".
+# One line per workaround comment: file, line and links (space-separated),
+# separated by \x1f, which no sane file name contains (a tab can).
 scan() {
     awk '
         function flush() {
@@ -63,7 +67,7 @@ scan() {
                     rest = substr(rest, RSTART + RLENGTH)
                 }
                 if (tolower(block) ~ /no-link:[[:space:]]*[^[:space:]]/) links = "no-link"
-                printf "%s\t%d\t%s\n", bfile, start, links
+                printf "%s\037%d\037%s\n", bfile, start, links
             }
             block = ""
         }
@@ -73,7 +77,8 @@ scan() {
         heredoc != "" { line = $0; sub(/^[[:space:]]+/, "", line); if (line == heredoc) heredoc = ""; next }
         /^[[:space:]]*#/ { if (block == "") { start = FNR; bfile = FILENAME }; block = block " " $0; next }
         { flush() }
-        match($0, /<<-?[[:space:]]*["'\'']?[A-Za-z_][A-Za-z0-9_]*/) {
+        # A heredoc starts with <<WORD outside arithmetic ($((1 << n)) is a shift).
+        match($0, /<<-?[[:space:]]*["'\'']?[A-Za-z_][A-Za-z0-9_]*/) && index(substr($0, 1, RSTART), "((") == 0 {
             heredoc = substr($0, RSTART, RLENGTH)
             gsub(/^<<-?[[:space:]]*["'\'']?/, "", heredoc)
         }
@@ -90,7 +95,7 @@ if [ ${#files[@]} -gt 0 ]; then
 fi
 
 if [ -n "$found" ]; then
-    while IFS=$'\t' read -r file line links; do
+    while IFS=$'\x1f' read -r file line links; do
         if [ -z "$links" ]; then
             printf '%s:%s: workaround comment without a link\n' "$file" "$line"
             missing=$((missing + 1))
@@ -100,7 +105,7 @@ fi
 
 if [ "$STATES" -eq 1 ] && [ -n "$found" ]; then
     command -v gh >/dev/null || { echo "--states needs gh" >&2; exit 2; }
-    while IFS=$'\t' read -r file line links; do
+    while IFS=$'\x1f' read -r file line links; do
         for url in $links; do
             if [[ $url =~ ^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$ ]]; then
                 url="https://github.com/${BASH_REMATCH[1]}/issues/${BASH_REMATCH[2]}"

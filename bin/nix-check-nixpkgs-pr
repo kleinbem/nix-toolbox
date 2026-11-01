@@ -138,7 +138,12 @@ states=()
 command -v gh >/dev/null && states=(--states)
 NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
 rc=0
-out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- '*.nix' 2>&1) || rc=$?
+out=""
+if [ -n "$NIXFILES" ]; then
+    # Only the PR's own .nix files, not uncommitted edits elsewhere.
+    mapfile -t nixfiles <<<"$NIXFILES"
+    out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- "${nixfiles[@]/#/:(literal)}" 2>&1) || rc=$?
+fi
 if [ "$rc" -gt 1 ]; then
     fail "nix-check-workarounds failed (exit $rc): $out"
     out=""

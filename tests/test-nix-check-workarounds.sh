@@ -94,6 +94,18 @@ assert_eq "fixture.sh:4: workaround comment without a link" "$(head -1 <<<"$out"
 out=$("$tool" --base no-such-rev "$repo" 2>&1) && rc=0 || rc=$?
 assert_eq 2 "$rc" "an unknown --base revision is an error, not a pass"
 
+echo "== arithmetic shifts and git errors"
+cat >"$repo/shift.sh" <<'SH'
+value=$((1 << shift))
+# Workaround without a link after a shift.
+true
+SH
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- shift.sh 2>&1) && rc=0 || rc=$?
+assert_eq "shift.sh:2: workaround comment without a link" "$(head -1 <<<"$out")" "a shift is no heredoc"
+out=$("$tool" "$repo" -- ':(bogus)x' 2>&1) && rc=0 || rc=$?
+assert_eq 2 "$rc" "a git error (bad pathspec) is an error, not a pass"
+
 echo "== pathspec"
 out=$("$tool" "$repo" -- script.sh 2>&1) && rc=0 || rc=$?
 assert_eq 0 "$rc" "pathspec limits the files"
