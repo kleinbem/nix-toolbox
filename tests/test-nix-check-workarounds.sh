@@ -109,6 +109,13 @@ assert_eq "shift.sh:2: workaround comment without a link" "$(head -1 <<<"$out")"
 out=$("$tool" "$repo" -- ':(bogus)x' 2>&1) && rc=0 || rc=$?
 assert_eq 2 "$rc" "a git error (bad pathspec) is an error, not a pass"
 
+echo "== symlinks"
+ln -s ../elsewhere/missing.just "$repo/dangling.just"
+ln -s unlinked.nix "$repo/alias.nix"
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- '*.just' alias.nix 2>&1) && rc=0 || rc=$?
+assert_eq 0 "$rc" "dangling and in-repo symlinks are skipped"
+
 echo "== pathspec"
 out=$("$tool" "$repo" -- script.sh 2>&1) && rc=0 || rc=$?
 assert_eq 0 "$rc" "pathspec limits the files"
