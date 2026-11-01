@@ -50,7 +50,10 @@ else
     git ls-files -z -- "${PATHSPEC[@]}" >"$list" || exit 2
 fi
 files=()
-mapfile -d '' files <"$list"
+while IFS= read -r -d '' f; do
+    # Symlinks point at files checked in their own repo, and dangle in a lone clone.
+    [ -f "$f" ] && [ ! -L "$f" ] && files+=("$f")
+done <"$list"
 
 # One line per workaround comment: file, line and links (space-separated),
 # separated by \x1f, which no sane file name contains (a tab can).
