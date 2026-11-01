@@ -1,9 +1,6 @@
-# Shared assertion helpers for bash test scripts. Source this, run your
-# assert_* calls, then call test_summary at the end — it prints the tally
-# and exits non-zero if anything failed (so a CI step fails loudly).
-#
-# Not a framework — for a test surface small enough that a hand-rolled
-# ~30-line helper is less overhead than pulling in bats or similar.
+# Shared assertion helpers for bash test scripts. Source this, run assert_*,
+# then call test_summary: it prints the tally and exits non-zero on any failure.
+# Deliberately tiny, so small test suites don't need bats.
 
 _PASS=0
 _FAIL=0

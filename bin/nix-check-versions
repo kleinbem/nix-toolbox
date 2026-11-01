@@ -10,11 +10,8 @@ dir="${1:-.}"
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 
-# -o isolates just the "<name>Version = \"...\"" token per match, so the
-# per-line parsing below starts right at the identifier — no leading text
-# for a greedy `.*` to eat into (that bug — a leading `.*([a-zA-Z]+)Version`
-# capturing only the last letter before "Version" — is why this needed
-# fixing rather than a straight port).
+# -o keeps only the "<name>Version = \"...\"" token, so the parsing below
+# starts at the identifier and a greedy `.*` can't eat into the name.
 grep -rEo '[a-zA-Z]+Version\s*=\s*"[0-9][^"]*"' "$dir" --include="*.nix" 2>/dev/null > "$tmp" || true
 
 if [ ! -s "$tmp" ]; then
