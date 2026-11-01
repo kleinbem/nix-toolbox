@@ -250,7 +250,8 @@ if [ ${#LOGS[@]} -gt 0 ]; then
     echo "== warnings in build logs (grouped; sort them into ours, harmless, upstream)"
     for log in "${LOGS[@]}"; do
         echo "-- $log"
-        grep -iE 'warning' "$log" |
+        # grep exits 1 for a log without warnings; a missing or unreadable log (2) still fails.
+        { grep -iE 'warning' "$log" || [ $? -eq 1 ]; } |
             sed -E 's/^[0-9]{4}-[0-9-]+T[0-9:.]+Z //; s#/nix/store/[a-z0-9]{32}-#/nix/store/…-#g; s/[0-9]+/N/g' |
             cut -c1-160 | sort | uniq -c | sort -rn | head -40
     done
