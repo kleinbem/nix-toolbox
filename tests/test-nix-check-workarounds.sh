@@ -99,6 +99,9 @@ cat >"$repo/shift.sh" <<'SH'
 value=$((1 << shift))
 # Workaround without a link after a shift.
 true
+n=$((n + 1)); cat <<'EOF2'
+# Workaround in fixture data after a closed arithmetic expansion.
+EOF2
 SH
 git -C "$repo" add -A
 out=$("$tool" "$repo" -- shift.sh 2>&1) && rc=0 || rc=$?

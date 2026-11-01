@@ -56,6 +56,11 @@ mapfile -d '' files <"$list"
 # separated by \x1f, which no sane file name contains (a tab can).
 scan() {
     awk '
+        function in_arith(pre,    o, c) {
+            o = gsub(/\(\(/, "", pre)
+            c = gsub(/\)\)/, "", pre)
+            return o > c
+        }
         function flush() {
             text = tolower(block)
             gsub(/nix-check-workarounds/, "", text) # the tool name itself
@@ -77,8 +82,9 @@ scan() {
         heredoc != "" { line = $0; sub(/^[[:space:]]+/, "", line); if (line == heredoc) heredoc = ""; next }
         /^[[:space:]]*#/ { if (block == "") { start = FNR; bfile = FILENAME }; block = block " " $0; next }
         { flush() }
-        # A heredoc starts with <<WORD outside arithmetic ($((1 << n)) is a shift).
-        match($0, /<<-?[[:space:]]*["'\'']?[A-Za-z_][A-Za-z0-9_]*/) && index(substr($0, 1, RSTART), "((") == 0 {
+        # A heredoc starts with <<WORD outside arithmetic: inside an open
+        # $(( … the << is a shift.
+        match($0, /<<-?[[:space:]]*["'\'']?[A-Za-z_][A-Za-z0-9_]*/) && !in_arith(substr($0, 1, RSTART - 1)) {
             heredoc = substr($0, RSTART, RLENGTH)
             gsub(/^<<-?[[:space:]]*["'\'']?/, "", heredoc)
         }
