@@ -19,7 +19,7 @@
 #   2. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
 #      plain code, only [](#opt-…) becomes a link (a note, both forms are allowed);
 #   3. comments that announce a workaround ("fixed upstream", "drop with", …)
-#      carry a link in the same comment block;
+#      carry a link in the same comment block (nix-check-workarounds);
 #   4. new .nix files have no unused arguments or bindings (deadnix, if installed;
 #      modified files are skipped, their old code isn't the PR's);
 #   5. statix lint checks on changed .nix files (if installed);
@@ -134,37 +134,17 @@ for doc in $DOCS; do
 done
 
 echo "== workaround comments carry a link"
-NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
-found=0
-for f in $NIXFILES; do
-    [ -f "$f" ] || continue
-    # Comment blocks: runs of lines whose first non-blank character is '#'.
-    out=$(awk -v file="$f" '
-        function flush() {
-            if (block != "" && tolower(block) ~ /(fixed upstream|drop (it |this |them )?with|workaround|until upstream|a pr will follow)/ && block !~ /https?:\/\//)
-                printf "%s:%d: workaround comment without a link\n", file, start
-            block = ""
-        }
-        /^[[:space:]]*#/ { if (block == "") start = NR; block = block " " $0; next }
-        { flush() }
-        END { flush() }
-    ' "$f")
-    if [ -n "$out" ]; then
-        while IFS= read -r line; do fail "$line"; done <<<"$out"
-        found=1
-    fi
-    links=$(grep -ohE 'https://github\.com/[^/ ]+/[^/ ]+/(pull|issues)/[0-9]+' "$f" || true)
-    if [ -n "$links" ] && command -v gh >/dev/null; then
-        for url in $(printf '%s\n' "$links" | sort -u); do
-            state=$(gh pr view "$url" --json state --jq .state 2>/dev/null ||
-                gh issue view "$url" --json state --jq .state 2>/dev/null || echo "?")
-            case "$state" in
-            MERGED | CLOSED) note "$f: $url is $state; drop the workaround with the release that has it" ;;
-            esac
-        done
-    fi
-done
-[ "$found" -eq 0 ] && ok "every workaround comment in the changed .nix files has a link"
+states=()
+command -v gh >/dev/null && states=(--states)
+out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- '*.nix' 2>&1) || true
+while IFS= read -r line; do
+    case "$line" in
+    *" workaround comments, 0 without a link") ok "every workaround comment in the changed .nix files has a link" ;;
+    *" workaround comments, "*) ;;
+    *"without a link") fail "$line" ;;
+    ?*) note "$line" ;;
+    esac
+done <<<"$out"
 
 echo "== unused arguments and bindings in new .nix files"
 NEWNIX=$(git diff --name-only --diff-filter=A "$BASE" HEAD | grep -E '\.nix$' || true)

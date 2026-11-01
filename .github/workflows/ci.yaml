@@ -21,4 +21,11 @@ jobs:
           done
       - name: ShellCheck
         run: |
-          shellcheck -s bash bin/*
+          shellcheck -s bash bin/* tests/*.sh
+      - name: Tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for t in tests/test-*.sh; do
+            bash "$t"
+          done
