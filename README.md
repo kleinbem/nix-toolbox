@@ -13,6 +13,7 @@ Put `bin/` on `PATH` to use these directly.
 | `nix-audit-locks <flake-dir> <repo-dir>...` | Compare a flake's locked input revisions against the actual git HEAD of local sibling repos, report drift |
 | `nix-verify-devshells [flake-ref]` | Build every devShell a flake defines (introspected, not hardcoded) for the current system, report pass/fail per shell |
 | `nix-check-nixpkgs-pr [--pr number|url] [--base rev] [--log file] [--drvs-against rev] [dir]` | Mechanical checks for a nixpkgs PR branch or remote PR: variants' `meta.position` in their own file, option links in module docs (notes `{option}`), a link on every workaround comment (state via `gh` if present), `deadnix` and `statix` on new files, common review anti-patterns (legacy python format, rev vs tag, unexplained doCheck = false, maintainer emails); optionally groups a build log's warnings and tells which derivations changed since a revision |
+| `nix-check-workarounds [--base rev] [--states] [dir] [-- pathspec]` | Every workaround comment links its upstream issue or PR (URL or `owner/repo#123`): fails on ones without, and with `--states` (via `gh`) lists links that are merged or closed, so the workaround can go. `--base` checks only a PR's changed files |
 | `nix-check-lock [lock-path] [pgrep-pattern]` | Inspect a flock file used to serialize long-running builds — is it held, and by what |
 | `bash-test-lib.sh` | Sourced (not executed) — hand-rolled `assert_eq`/`assert_empty`/`test_summary` bash test helpers |
 
