@@ -142,7 +142,13 @@ out=""
 # Only the PR's own .nix files, not uncommitted edits elsewhere; NUL-separated,
 # since git quotes unusual names in its line output.
 nixfiles=()
-mapfile -d '' nixfiles < <(git diff -z --name-only --diff-filter=d "$BASE" HEAD -- '*.nix')
+nixlist=$(mktemp)
+if git diff -z --name-only --diff-filter=d "$BASE" HEAD -- '*.nix' >"$nixlist"; then
+    mapfile -d '' nixfiles <"$nixlist"
+else
+    fail "git diff $BASE HEAD failed; workaround comments not checked"
+fi
+rm -f "$nixlist"
 if [ ${#nixfiles[@]} -gt 0 ]; then
     out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- "${nixfiles[@]/#/:(literal)}" 2>&1) || rc=$?
 fi
