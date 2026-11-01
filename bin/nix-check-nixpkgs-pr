@@ -136,7 +136,13 @@ done
 echo "== workaround comments carry a link"
 states=()
 command -v gh >/dev/null && states=(--states)
-out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- '*.nix' 2>&1) || true
+NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
+rc=0
+out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- '*.nix' 2>&1) || rc=$?
+if [ "$rc" -gt 1 ]; then
+    fail "nix-check-workarounds failed (exit $rc): $out"
+    out=""
+fi
 while IFS= read -r line; do
     case "$line" in
     *" workaround comments, 0 without a link") ok "every workaround comment in the changed .nix files has a link" ;;

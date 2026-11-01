@@ -16,7 +16,8 @@
 # an http(s) link or an owner/repo#123 reference in the same block (our own
 # workarounds link our own issue). A comment that only mentions a workaround
 # says "no-link: <why>".
-# Exit code 1 when one has no link; --states only reports.
+# Exit code 1 when one has no link, 2 on usage or git errors; --states only
+# reports.
 set -euo pipefail
 
 BASE=""
@@ -28,44 +29,54 @@ while [ $# -gt 0 ]; do
     case "$1" in
     --base) need_value "$@"; BASE="$2"; shift 2 ;;
     --states) STATES=1; shift ;;
-    -h | --help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; PATHSPEC=("$@"); break ;;
     *) DIR="$1"; shift ;;
     esac
 done
 if [ ${#PATHSPEC[@]} -eq 0 ]; then
-    PATHSPEC=('*.nix' '*.sh' '*.bash' '*.yaml' '*.yml' '*.toml' '*.py' '*justfile' '*.just')
+    PATHSPEC=('*.nix' '*.sh' '*.bash' '*.yaml' '*.yml' '*.toml' '*.py' ':(icase)*justfile' '*.just')
 fi
 
 cd "$DIR"
 cd "$(git rev-parse --show-toplevel)"
 
+files=()
 if [ -n "$BASE" ]; then
-    FILES=$(git diff --name-only --diff-filter=d "$BASE" -- "${PATHSPEC[@]}")
+    git rev-parse -q --verify "$BASE^{commit}" >/dev/null || { echo "--base: unknown revision $BASE" >&2; exit 2; }
+    mapfile -d '' files < <(git diff -z --name-only --diff-filter=d "$BASE" -- "${PATHSPEC[@]}")
 else
-    FILES=$(git ls-files -- "${PATHSPEC[@]}")
+    mapfile -d '' files < <(git ls-files -z -- "${PATHSPEC[@]}")
 fi
 
 # One line per workaround comment: "<file>\t<line>\t<links, space-separated>".
 scan() {
     awk '
         function flush() {
-            if (block != "" && tolower(block) ~ /(workaround|work around|fixed upstream|until upstream|drop (it |this |them )?(with|once|when)|remove (it |this )?(once|when)|upstream (bug|issue|fix)|a pr will follow)/) {
+            text = tolower(block)
+            gsub(/nix-check-workarounds/, "", text) # the tool name itself
+            if (block != "" && text ~ /(workaround|work around|fixed upstream|until upstream|drop (it |this |them )?(with|once|when)|remove (it |this )?(once|when)|upstream (bug|issue|fix)|a pr will follow)/) {
                 links = ""
                 rest = block
                 while (match(rest, /https?:\/\/[^ )>"'\''`]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+/)) {
                     links = links (links == "" ? "" : " ") substr(rest, RSTART, RLENGTH)
                     rest = substr(rest, RSTART + RLENGTH)
                 }
-                if (tolower(block) ~ /no-link:/) links = "no-link"
+                if (tolower(block) ~ /no-link:[[:space:]]*[^[:space:]]/) links = "no-link"
                 printf "%s\t%d\t%s\n", bfile, start, links
             }
             block = ""
         }
-        FNR == 1 { flush() }
+        FNR == 1 { flush(); heredoc = "" }
         FNR == 1 && /^#!/ { next }
+        # Heredoc bodies are data (test fixtures), not comments.
+        heredoc != "" { line = $0; sub(/^[[:space:]]+/, "", line); if (line == heredoc) heredoc = ""; next }
         /^[[:space:]]*#/ { if (block == "") { start = FNR; bfile = FILENAME }; block = block " " $0; next }
         { flush() }
+        match($0, /<<-?[[:space:]]*["'\'']?[A-Za-z_][A-Za-z0-9_]*/) {
+            heredoc = substr($0, RSTART, RLENGTH)
+            gsub(/^<<-?[[:space:]]*["'\'']?/, "", heredoc)
+        }
         # A trailing comment is its own block.
         /[[:space:]]#[[:space:]]/ { start = FNR; bfile = FILENAME; block = substr($0, index($0, " #")); flush() }
         END { flush() }
@@ -74,8 +85,7 @@ scan() {
 
 missing=0
 found=""
-if [ -n "$FILES" ]; then
-    mapfile -t files <<<"$FILES"
+if [ ${#files[@]} -gt 0 ]; then
     found=$(scan "${files[@]}")
 fi
 

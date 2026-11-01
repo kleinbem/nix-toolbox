@@ -81,8 +81,21 @@ if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
         "$(head -1 <<<"$out")" "a merged PR behind owner/repo#N is reported"
 fi
 
+echo "== heredocs, an empty no-link and a bad base"
+cat >"$repo/fixture.sh" <<'SH'
+cat >x <<'EOF2'
+# Workaround with no link, but only fixture data.
+EOF2
+true # workaround no-link:
+SH
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- fixture.sh 2>&1) && rc=0 || rc=$?
+assert_eq "fixture.sh:4: workaround comment without a link" "$(head -1 <<<"$out")" "heredoc body skipped, no-link needs a reason"
+out=$("$tool" --base no-such-rev "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 2 "$rc" "an unknown --base revision is an error, not a pass"
+
 echo "== pathspec"
-out=$("$tool" "$repo" -- '*.sh' 2>&1) && rc=0 || rc=$?
+out=$("$tool" "$repo" -- script.sh 2>&1) && rc=0 || rc=$?
 assert_eq 0 "$rc" "pathspec limits the files"
 
 test_summary
