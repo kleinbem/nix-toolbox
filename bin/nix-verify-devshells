@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# nix-verify-devshells [flake-ref] — build every devShell a flake defines
-# (introspected via `nix eval`, not a hardcoded list) for the current
-# system, and report pass/fail per shell. Catches evaluation errors and
-# missing dependencies. flake-ref defaults to ".".
-#
-# Deliberately no `set -e` — the contract is to attempt every shell and
-# report all results, not bail on the first failure.
+# nix-verify-devshells [flake-ref]: build every devShell the flake defines for
+# the current system (default flake-ref "."), and report pass/fail per shell.
+# No `set -e` on purpose: every shell is attempted and all results reported.
 
 flake_ref="${1:-.}"
 

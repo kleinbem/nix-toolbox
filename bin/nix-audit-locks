@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# nix-audit-locks <flake-dir> <repo-dir>... — compare <flake-dir>/flake.lock's
-# pinned revisions against the current git HEAD of each given local repo
-# directory (matched by basename against the flake's input names). Reports
-# drift — useful when local sibling repos are flake inputs and you want to
-# know if the lockfile still reflects what's actually on disk.
+# nix-audit-locks <flake-dir> <repo-dir>...: report drift between the revisions
+# pinned in <flake-dir>/flake.lock and the git HEAD of each local repo dir
+# (matched by basename against the flake's input names).
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
