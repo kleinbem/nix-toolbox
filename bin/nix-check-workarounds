@@ -11,9 +11,9 @@
 #                  justfiles)
 #
 # A workaround comment is a '#' block or trailing comment that says "workaround",
-# "fixed upstream", "until upstream", "drop with/once/when", "remove once/when",
-# "upstream bug/issue/fix" or "a PR will follow". It needs an http(s) link or an
-# owner/repo#123 reference in the same block, or "no-link: <why>".
+# "work around", "fixed upstream", "until upstream", "drop with/once/when",
+# "remove once/when", "upstream bug/issue/fix" or "a PR will follow". It needs an
+# http(s) link or an owner/repo#123 reference in the same block, or "no-link: <why>".
 # Exit code 1 when one has no link, 2 on usage or git errors; --states only reports.
 set -euo pipefail
 
