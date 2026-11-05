@@ -10,14 +10,11 @@
 #   <pathspec>     limit the files (default: *.nix, shell, YAML, TOML, Python,
 #                  justfiles)
 #
-# A workaround comment is a '#' comment block (or a trailing '# …' comment) that
-# says "workaround", "fixed upstream", "until upstream", "drop with/once/when",
-# "remove once/when", "upstream bug/issue/fix" or "a PR will follow". It needs
-# an http(s) link or an owner/repo#123 reference in the same block (our own
-# workarounds link our own issue). A comment that only mentions a workaround
-# says "no-link: <why>".
-# Exit code 1 when one has no link, 2 on usage or git errors; --states only
-# reports.
+# A workaround comment is a '#' block or trailing comment that says "workaround",
+# "work around", "fixed upstream", "until upstream", "drop with/once/when",
+# "remove once/when", "upstream bug/issue/fix" or "a PR will follow". It needs an
+# http(s) link or an owner/repo#123 reference in the same block, or "no-link: <why>".
+# Exit code 1 when one has no link, 2 on usage or git errors; --states only reports.
 set -euo pipefail
 
 BASE=""
@@ -29,7 +26,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
     --base) need_value "$@"; BASE="$2"; shift 2 ;;
     --states) STATES=1; shift ;;
-    -h | --help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; PATHSPEC=("$@"); break ;;
     *) DIR="$1"; shift ;;
     esac
