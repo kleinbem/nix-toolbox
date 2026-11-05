@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared assertion helpers for bash test scripts. Source this, run assert_*,
 # then call test_summary: it prints the tally and exits non-zero on any failure.
 # Deliberately tiny, so small test suites don't need bats.
