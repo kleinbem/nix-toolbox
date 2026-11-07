@@ -12,10 +12,35 @@ if [ ! -e "$LOCK" ]; then
     exit 0
 fi
 
-# Try to take a non-blocking exclusive lock. If we can, nobody else holds it.
-if flock -n "$LOCK" -c true 2>/dev/null; then
-    echo "✅ Lock file exists but is NOT held by any active process."
-else
-    echo "🕵️  Workspace is LOCKED. Active tasks:"
-    pgrep -af "$PATTERN" || true
+# flock (util-linux) is the one dependency beyond the usual set: the lock is
+# a flock lock, so nothing else can test it.
+if ! command -v flock >/dev/null; then
+    echo "❌ flock (util-linux) is not installed; can't inspect $LOCK" >&2
+    exit 2
 fi
+
+# Non-blocking try; exit 10 means another process holds it, anything else is
+# an error opening or locking the file.
+rc=0
+flock -n -E 10 "$LOCK" -c true || rc=$?
+case $rc in
+0) echo "✅ Lock file exists but is NOT held by any active process." ;;
+10)
+    echo "🕵️  Workspace is LOCKED. Processes matching \"$PATTERN\" (possible holders):"
+    if command -v pgrep >/dev/null; then
+        prc=0
+        pgrep -af "$PATTERN" || prc=$?
+        case $prc in
+        0) ;;
+        1) echo "   (none)" ;;
+        *) echo "❌ pgrep failed (exit $prc); check the pattern" >&2; exit 2 ;;
+        esac
+    else
+        echo "   (pgrep not installed)"
+    fi
+    ;;
+*)
+    echo "❌ Could not inspect $LOCK (flock exit $rc)" >&2
+    exit 2
+    ;;
+esac

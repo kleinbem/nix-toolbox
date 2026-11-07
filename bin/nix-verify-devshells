@@ -10,9 +10,31 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-CURRENT_SYSTEM=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+CURRENT_SYSTEM=$(nix eval --raw --impure --expr 'builtins.currentSystem') || {
+    echo "Could not determine the current system." >&2
+    exit 1
+}
 
-mapfile -t SHELLS < <(nix eval --json "${flake_ref}#devShells.${CURRENT_SYSTEM}" --apply builtins.attrNames 2>/dev/null | jq -r '.[]')
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+
+# No devShells for this system is an empty result; any eval error (bad flake
+# ref, broken flake) must fail, not pass as "no shells". "#." is the outputs.
+SHELLS=()
+if ! has=$(nix eval --json "${flake_ref}#." --apply "o: o ? devShells && o.devShells ? \"${CURRENT_SYSTEM}\"" 2>"$log"); then
+    cat "$log" >&2
+    echo "Could not evaluate ${flake_ref}." >&2
+    exit 1
+fi
+if [ "$has" = "true" ]; then
+    if ! names=$(nix eval --json "${flake_ref}#devShells.${CURRENT_SYSTEM}" --apply builtins.attrNames 2>"$log"); then
+        cat "$log" >&2
+        echo "Could not list ${flake_ref}#devShells.${CURRENT_SYSTEM}." >&2
+        exit 1
+    fi
+    names=$(jq -r '.[]' <<<"$names") || exit 1
+    [ -n "$names" ] && mapfile -t SHELLS <<<"$names"
+fi
 
 if [ "${#SHELLS[@]}" -eq 0 ]; then
     echo "No devShells found for ${flake_ref}#devShells.${CURRENT_SYSTEM}."
@@ -23,9 +45,6 @@ echo -e "${YELLOW}🧪 Verifying DevShell Evaluation on ${CURRENT_SYSTEM}...${NC
 echo "------------------------------------------------------------"
 printf "%-15s | %-10s | %-30s\n" "Shell" "Status" "Details/Error"
 echo "------------------------------------------------------------"
-
-log=$(mktemp)
-trap 'rm -f "$log"' EXIT
 
 any_failed=0
 for shell in "${SHELLS[@]}"; do

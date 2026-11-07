@@ -53,6 +53,22 @@ cd "$DIR"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
+# One EXIT trap for every temporary worktree (--pr and --drvs-against both
+# make one); removed from the original checkout, newest first.
+REPO_ROOT=$ROOT
+cleanup_dirs=()
+# Trap-only function: upstream: koalaman/shellcheck#2542
+# shellcheck disable=SC2317,SC2329
+cleanup() {
+    local i d
+    for ((i = ${#cleanup_dirs[@]} - 1; i >= 0; i--)); do
+        d=${cleanup_dirs[i]}
+        git -C "$REPO_ROOT" worktree remove --force "$d/wt" >/dev/null 2>&1 || true
+        rm -rf "$d"
+    done
+}
+trap cleanup EXIT
+
 if [ -n "$PR" ]; then
     PR_NUM=$(printf '%s' "$PR" | grep -oE '[0-9]+$' || true)
     [ -n "$PR_NUM" ] || { echo "--pr needs a PR number or GitHub PR URL" >&2; exit 2; }
@@ -75,7 +91,7 @@ if [ -n "$PR" ]; then
     [ -n "$BASE" ] || { echo "no base revision found for PR #$PR_NUM; pass --base" >&2; exit 2; }
 
     tmp_wt=$(mktemp -d)
-    trap 'git worktree remove --force "$tmp_wt/wt" >/dev/null 2>&1 || true; rm -rf "$tmp_wt"' EXIT
+    cleanup_dirs+=("$tmp_wt")
     git worktree add -q --detach "$tmp_wt/wt" "$PR_HEAD"
     cd "$tmp_wt/wt"
     ROOT="$tmp_wt/wt"
@@ -260,7 +276,7 @@ fi
 if [ -n "$AGAINST" ]; then
     echo "== derivations at HEAD vs ${AGAINST:0:12}"
     tmp=$(mktemp -d)
-    trap 'git worktree remove --force "$tmp/wt" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+    cleanup_dirs+=("$tmp")
     git worktree add -q --detach "$tmp/wt" "$AGAINST"
     for attr in $ATTRS "${EXTRA_ATTRS[@]}"; do
         a=$(NIXPKGS_ALLOW_UNFREE=1 nix-instantiate "$tmp/wt" -A "$attr" 2>/dev/null | head -1 || true)
