@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# nix-check-workarounds [--base <rev>] [--states] [dir] [-- <pathspec>...]
+# Every workaround in a repo should link the upstream issue or PR it waits on,
+# so it can be dropped when the fix arrives. This finds the ones that don't.
+#
+#   --base <rev>   only files changed since <rev> (a PR's check); default: every
+#                  tracked file (an audit)
+#   --states       look up each linked GitHub issue or PR with `gh` and list the
+#                  merged or closed ones: their workaround can probably go
+#   <pathspec>     limit the files (default: *.nix, shell, YAML, TOML, Python,
+#                  justfiles)
+#
+# A workaround comment is a '#' block or trailing comment that says "workaround",
+# "work around", "fixed upstream", "until upstream", "drop with/once/when",
+# "remove once/when", "upstream bug/issue/fix" or "a PR will follow". It needs an
+# http(s) link or an owner/repo#123 reference in the same block, or "no-link: <why>".
+# Exit code 1 when one has no link, 2 on usage or git errors; --states only reports.
+set -euo pipefail
+
+BASE=""
+STATES=0
+DIR="."
+PATHSPEC=()
+need_value() { [ $# -ge 2 ] || { echo "$1 needs a value, see --help" >&2; exit 2; }; }
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --base) need_value "$@"; BASE="$2"; shift 2 ;;
+    --states) STATES=1; shift ;;
+    -h | --help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --) shift; PATHSPEC=("$@"); break ;;
+    *) DIR="$1"; shift ;;
+    esac
+done
+if [ ${#PATHSPEC[@]} -eq 0 ]; then
+    PATHSPEC=('*.nix' '*.sh' '*.bash' '*.yaml' '*.yml' '*.toml' '*.py' ':(icase)*justfile' '*.just')
+fi
+
+cd "$DIR"
+cd "$(git rev-parse --show-toplevel)"
+
+list=$(mktemp)
+trap 'rm -f "$list"' EXIT
+if [ -n "$BASE" ]; then
+    git rev-parse -q --verify "$BASE^{commit}" >/dev/null || { echo "--base: unknown revision $BASE" >&2; exit 2; }
+    git diff -z --name-only --diff-filter=d "$BASE" -- "${PATHSPEC[@]}" >"$list" || exit 2
+else
+    git ls-files -z -- "${PATHSPEC[@]}" >"$list" || exit 2
+fi
+files=()
+while IFS= read -r -d '' f; do
+    # Symlinks point at files checked in their own repo, and dangle in a lone clone.
+    [ -f "$f" ] && [ ! -L "$f" ] && files+=("$f")
+done <"$list"
+
+# One line per workaround comment: file, line and links (space-separated),
+# separated by \x1f, which no sane file name contains (a tab can).
+scan() {
+    awk '
+        function in_arith(pre,    o, c) {
+            o = gsub(/\(\(/, "", pre)
+            c = gsub(/\)\)/, "", pre)
+            return o > c
+        }
+        function flush() {
+            text = tolower(block)
+            gsub(/nix-check-workarounds/, "", text) # the tool name itself
+            if (block != "" && text ~ /(workaround|work around|fixed upstream|until upstream|drop (it |this |them )?(with|once|when)|remove (it |this )?(once|when)|upstream (bug|issue|fix)|a pr will follow)/) {
+                links = ""
+                rest = block
+                while (match(rest, /https?:\/\/[^ )>"'\''`]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+/)) {
+                    links = links (links == "" ? "" : " ") substr(rest, RSTART, RLENGTH)
+                    rest = substr(rest, RSTART + RLENGTH)
+                }
+                if (tolower(block) ~ /no-link:[[:space:]]*[^[:space:]]/) links = "no-link"
+                printf "%s\037%d\037%s\n", bfile, start, links
+            }
+            block = ""
+        }
+        FNR == 1 { flush(); heredoc = "" }
+        FNR == 1 && /^#!/ { next }
+        # Heredoc bodies are data (test fixtures), not comments.
+        heredoc != "" { line = $0; sub(/^[[:space:]]+/, "", line); if (line == heredoc) heredoc = ""; next }
+        /^[[:space:]]*#/ { if (block == "") { start = FNR; bfile = FILENAME }; block = block " " $0; next }
+        { flush() }
+        # A heredoc starts with <<WORD outside arithmetic: inside an open
+        # $(( … the << is a shift.
+        match($0, /<<-?[[:space:]]*["'\'']?[A-Za-z_][A-Za-z0-9_]*/) && !in_arith(substr($0, 1, RSTART - 1)) {
+            heredoc = substr($0, RSTART, RLENGTH)
+            gsub(/^<<-?[[:space:]]*["'\'']?/, "", heredoc)
+        }
+        # A trailing comment is its own block.
+        /[[:space:]]#[[:space:]]/ { start = FNR; bfile = FILENAME; block = substr($0, index($0, " #")); flush() }
+        END { flush() }
+    ' "$@"
+}
+
+missing=0
+found=""
+if [ ${#files[@]} -gt 0 ]; then
+    found=$(scan "${files[@]}")
+fi
+
+if [ -n "$found" ]; then
+    while IFS=$'\x1f' read -r file line links; do
+        if [ -z "$links" ]; then
+            printf '%s:%s: workaround comment without a link\n' "$file" "$line"
+            missing=$((missing + 1))
+        fi
+    done <<<"$found"
+fi
+
+if [ "$STATES" -eq 1 ] && [ -n "$found" ]; then
+    command -v gh >/dev/null || { echo "--states needs gh" >&2; exit 2; }
+    while IFS=$'\x1f' read -r file line links; do
+        for url in $links; do
+            if [[ $url =~ ^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$ ]]; then
+                url="https://github.com/${BASH_REMATCH[1]}/issues/${BASH_REMATCH[2]}"
+            fi
+            [[ $url =~ ^https://github\.com/[^/]+/[^/]+/(pull|issues)/[0-9]+ ]] || continue
+            url=${BASH_REMATCH[0]}
+            state=$(gh pr view "$url" --json state --jq .state 2>/dev/null ||
+                gh issue view "$url" --json state --jq .state 2>/dev/null || echo "?")
+            case "$state" in
+            MERGED | CLOSED) printf '%s:%s: %s is %s; drop the workaround once the fix is in what we use\n' "$file" "$line" "$url" "$state" ;;
+            "?") printf '%s:%s: %s: state unknown\n' "$file" "$line" "$url" ;;
+            esac
+        done
+    done <<<"$found"
+fi
+
+total=0
+[ -n "$found" ] && total=$(printf '%s\n' "$found" | wc -l)
+echo "$total workaround comments, $missing without a link"
+[ "$missing" -eq 0 ]

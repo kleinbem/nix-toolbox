@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# nix-check-nixpkgs-pr [options] [nixpkgs-dir] — mechanical checks for a nixpkgs PR branch
+# before it is marked ready, or for reviewing an open PR. Builds and tests don't catch these.
+#
+#   --pr <number|url>   fetch and check this GitHub pull request in a temporary worktree
+#   --base <rev>        compare against this revision (default: merge-base with
+#                       upstream/master, else origin/master)
+#   --log <file>        group the warnings in a build log (repeatable)
+#   --drvs-against <rev>
+#                       instantiate the changed attributes at <rev> too and say
+#                       whether their derivations changed (so tests must rerun)
+#   --attr <attr>       extra attribute for --drvs-against, e.g. nixosTests.foo
+#                       (repeatable)
+#
+# Checks:
+#   1. every changed pkgs/by-name package's meta.position points into its own
+#      directory (a bare `.override` variant keeps the base package's position,
+#      so nixpkgs-update never sees its `# nixpkgs-update: no auto update`);
+#   2. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
+#      plain code, only [](#opt-…) becomes a link (a note, both forms are allowed);
+#   3. comments that announce a workaround ("fixed upstream", "drop with", …)
+#      carry a link in the same comment block (nix-check-workarounds);
+#   4. new .nix files have no unused arguments or bindings (deadnix, if installed;
+#      modified files are skipped, their old code isn't the PR's);
+#   5. statix suggestions on new .nix files (if installed; notes only);
+#   6. common review anti-patterns: legacy python format, rev vs tag in fetchFromGitHub,
+#      unexplained doCheck = false, invalid maintainer emails.
+# Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
+set -euo pipefail
+
+BASE=""
+LOGS=()
+AGAINST=""
+EXTRA_ATTRS=()
+DIR="."
+PR=""
+need_value() { [ $# -ge 2 ] || { echo "$1 needs a value, see --help" >&2; exit 2; }; }
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --base | --log | --drvs-against | --attr | --pr) need_value "$@" ;;
+    esac
+    case "$1" in
+    --pr) PR="$2"; shift 2 ;;
+    --base) BASE="$2"; shift 2 ;;
+    --log) LOGS+=("$2"); shift 2 ;;
+    --drvs-against) AGAINST="$2"; shift 2 ;;
+    --attr) EXTRA_ATTRS+=("$2"); shift 2 ;;
+    -h | --help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) DIR="$1"; shift ;;
+    esac
+done
+cd "$DIR"
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+if [ -n "$PR" ]; then
+    PR_NUM=$(printf '%s' "$PR" | grep -oE '[0-9]+$' || true)
+    [ -n "$PR_NUM" ] || { echo "--pr needs a PR number or GitHub PR URL" >&2; exit 2; }
+    REMOTE="upstream"
+    if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
+        REMOTE="origin"
+    fi
+    echo "== fetching PR #$PR_NUM from $REMOTE"
+    git fetch -q "$REMOTE" "pull/$PR_NUM/head"
+    PR_HEAD=$(git rev-parse FETCH_HEAD)
+
+    if [ -z "$BASE" ]; then
+        for ref in upstream/master origin/master master; do
+            if git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
+                BASE=$(git merge-base "$PR_HEAD" "$ref")
+                break
+            fi
+        done
+    fi
+    [ -n "$BASE" ] || { echo "no base revision found for PR #$PR_NUM; pass --base" >&2; exit 2; }
+
+    tmp_wt=$(mktemp -d)
+    trap 'git worktree remove --force "$tmp_wt/wt" >/dev/null 2>&1 || true; rm -rf "$tmp_wt"' EXIT
+    git worktree add -q --detach "$tmp_wt/wt" "$PR_HEAD"
+    cd "$tmp_wt/wt"
+    ROOT="$tmp_wt/wt"
+fi
+
+if [ -z "$BASE" ]; then
+    for ref in upstream/master origin/master master; do
+        if git rev-parse -q --verify "$ref" >/dev/null; then
+            BASE=$(git merge-base HEAD "$ref")
+            break
+        fi
+    done
+fi
+[ -n "$BASE" ] || { echo "no base revision found; pass --base" >&2; exit 2; }
+
+FAILED=0
+fail() { FAILED=1; printf '  ✗ %s\n' "$*"; }
+ok() { printf '  ✓ %s\n' "$*"; }
+note() { printf '  · %s\n' "$*"; }
+
+CHANGED=$(git diff --name-only "$BASE" HEAD)
+# Package attributes from changed by-name directories (pkgs/by-name/xx/<attr>/…).
+ATTRS=$(printf '%s\n' "$CHANGED" | sed -nE 's#^pkgs/by-name/[^/]+/([^/]+)/.*#\1#p' | sort -u)
+
+echo "== meta.position of changed packages (base ${BASE:0:12})"
+if [ -z "$ATTRS" ]; then
+    note "no pkgs/by-name changes"
+fi
+for attr in $ATTRS; do
+    [ -f "pkgs/by-name/${attr:0:2}/$attr/package.nix" ] || continue
+    pos=$(NIXPKGS_ALLOW_UNFREE=1 NIXPKGS_ALLOW_INSECURE=1 \
+        nix-instantiate --eval --strict -A "$attr.meta.position" 2>/dev/null | tr -d '"' || true)
+    file=${pos%:*}
+    case "$file" in
+    "") note "$attr: no meta.position (doesn't evaluate here?)" ;;
+    "$ROOT/pkgs/by-name/${attr:0:2}/$attr/"*) ok "$attr" ;;
+    *) fail "$attr: meta.position is ${file#"$ROOT/"}; re-anchor it in its own file (see llama-cpp-vulkan)" ;;
+    esac
+done
+
+echo "== option references in changed module docs"
+DOCS=$(printf '%s\n' "$CHANGED" | grep -E '^nixos/modules/.*\.md$' || true)
+if [ -z "$DOCS" ]; then
+    note "no module docs changed"
+fi
+for doc in $DOCS; do
+    [ -f "$doc" ] || continue
+    hits=$(grep -n '{option}`' "$doc" || true)
+    if [ -n "$hits" ]; then
+        while IFS= read -r line; do
+            note "$doc:${line%%:*}: {option}\`…\` is plain code, not a link; [](#opt-…) links"
+        done <<<"$hits"
+    else
+        ok "$doc"
+    fi
+done
+
+echo "== workaround comments carry a link"
+states=()
+command -v gh >/dev/null && states=(--states)
+NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
+rc=0
+out=""
+# Only the PR's own .nix files, not uncommitted edits elsewhere; NUL-separated,
+# since git quotes unusual names in its line output.
+nixfiles=()
+nixlist=$(mktemp)
+if git diff -z --name-only --diff-filter=d "$BASE" HEAD -- '*.nix' >"$nixlist"; then
+    mapfile -d '' nixfiles <"$nixlist"
+else
+    fail "git diff $BASE HEAD failed; workaround comments not checked"
+fi
+rm -f "$nixlist"
+if [ ${#nixfiles[@]} -gt 0 ]; then
+    out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- "${nixfiles[@]/#/:(literal)}" 2>&1) || rc=$?
+fi
+if [ "$rc" -gt 1 ]; then
+    fail "nix-check-workarounds failed (exit $rc): $out"
+    out=""
+fi
+while IFS= read -r line; do
+    case "$line" in
+    *" workaround comments, 0 without a link") ok "every workaround comment in the changed .nix files has a link" ;;
+    *" workaround comments, "*) ;;
+    *"without a link") fail "$line" ;;
+    ?*) note "$line" ;;
+    esac
+done <<<"$out"
+
+echo "== unused arguments and bindings in new .nix files"
+NEWNIX=$(git diff --name-only --diff-filter=A "$BASE" HEAD | grep -E '\.nix$' || true)
+if ! command -v deadnix >/dev/null; then
+    note "deadnix not installed, skipped"
+elif [ -z "$NEWNIX" ]; then
+    note "no new .nix files"
+else
+    for f in $NEWNIX; do
+        if deadnix --fail -q "$f" >/dev/null 2>&1; then
+            ok "$f"
+        else
+            fail "$f: $(deadnix -o json "$f" 2>/dev/null | jq -r '[.results[]|"\(.line):\(.message)"]|join("; ")')"
+        fi
+    done
+fi
+
+if command -v statix >/dev/null; then
+    echo "== statix check on new .nix files"
+    if [ -z "$NEWNIX" ]; then
+        note "no new .nix files"
+    else
+        for f in $NEWNIX; do
+            [ -f "$f" ] || continue
+            sout=$(statix check "$f" 2>&1 || true)
+            if [ -n "$sout" ]; then
+                note "$f has statix suggestions:"
+                printf '%s\n' "$sout" | sed 's/^/    /'
+            else
+                ok "$f"
+            fi
+        done
+    fi
+fi
+
+echo "== common derivation review patterns"
+if [ -z "$NIXFILES" ]; then
+    note "no .nix files changed"
+else
+    for f in $NIXFILES; do
+        [ -f "$f" ] || continue
+        # Legacy format = "setuptools" or "pyproject"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            note "$f:${line%%:*}: format = \"...\" is legacy; prefer pyproject = true;"
+        done < <(grep -nE 'format\s*=\s*"(setuptools|pyproject)"' "$f" || true)
+
+        # GitHub tag fetcher using rev = "v..."
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            note "$f:${line%%:*}: uses rev = \"v...\"; prefer tag = \"v...\" for GitHub releases/tags"
+        done < <(grep -nE 'rev\s*=\s*"v\$\{' "$f" || true)
+
+        # doCheck = false without explanatory comment
+        comment_re='^[[:space:]]*#'
+        inline_comment_re='#[[:space:]]*[^[:space:]]'
+        while IFS= read -r lnum; do
+            [ -n "$lnum" ] || continue
+            prev_line=$(sed -n "$((lnum - 1))p" "$f" 2>/dev/null || true)
+            curr_line=$(sed -n "${lnum}p" "$f")
+            if [[ ! "$curr_line" =~ $inline_comment_re ]] && [[ ! "$prev_line" =~ $comment_re ]]; then
+                note "$f:$lnum: doCheck = false without an explanatory comment"
+            fi
+        done < <(grep -nE '^[[:space:]]*doCheck\s*=\s*false;' "$f" | cut -d: -f1 || true)
+    done
+fi
+
+if printf '%s\n' "$CHANGED" | grep -qx "maintainers/maintainer-list.nix"; then
+    echo "== maintainer list email format"
+    added_emails=$(git diff "$BASE" HEAD -- maintainers/maintainer-list.nix | grep -E '^\+[[:space:]]*email\s*=' || true)
+    if [ -n "$added_emails" ]; then
+        while IFS= read -r eline; do
+            val=$(printf '%s\n' "$eline" | sed -E 's/^\+[[:space:]]*email\s*=\s*"([^"]+)";/\1/')
+            if [[ "$val" != *"@"* ]]; then
+                fail "maintainers/maintainer-list.nix: added email '$val' is not a valid email address (omit or fix)"
+            else
+                ok "maintainers/maintainer-list.nix: email '$val' is valid"
+            fi
+        done <<<"$added_emails"
+    fi
+fi
+
+if [ ${#LOGS[@]} -gt 0 ]; then
+    echo "== warnings in build logs (grouped; sort them into ours, harmless, upstream)"
+    for log in "${LOGS[@]}"; do
+        echo "-- $log"
+        # grep exits 1 for a log without warnings; a missing or unreadable log (2) still fails.
+        { grep -iE 'warning' "$log" || [ $? -eq 1 ]; } |
+            sed -E 's/^[0-9]{4}-[0-9-]+T[0-9:.]+Z //; s#/nix/store/[a-z0-9]{32}-#/nix/store/…-#g; s/[0-9]+/N/g' |
+            cut -c1-160 | sort | uniq -c | sort -rn | head -40
+    done
+fi
+
+if [ -n "$AGAINST" ]; then
+    echo "== derivations at HEAD vs ${AGAINST:0:12}"
+    tmp=$(mktemp -d)
+    trap 'git worktree remove --force "$tmp/wt" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+    git worktree add -q --detach "$tmp/wt" "$AGAINST"
+    for attr in $ATTRS "${EXTRA_ATTRS[@]}"; do
+        a=$(NIXPKGS_ALLOW_UNFREE=1 nix-instantiate "$tmp/wt" -A "$attr" 2>/dev/null | head -1 || true)
+        b=$(NIXPKGS_ALLOW_UNFREE=1 nix-instantiate . -A "$attr" 2>/dev/null | head -1 || true)
+        if [ -z "$a" ] || [ -z "$b" ]; then
+            note "$attr: doesn't evaluate on both sides"
+        elif [ "$a" = "$b" ]; then
+            ok "$attr: unchanged"
+        else
+            note "$attr: changed ($(basename "$a") → $(basename "$b")); its tests must run again"
+        fi
+    done
+fi
+
+echo
+if [ "$FAILED" -eq 0 ]; then echo "✅ no failures"; else echo "❌ fix the ✗ items"; fi
+exit "$FAILED"
