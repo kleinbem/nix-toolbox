@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# nix-audit-deps [repo-path] [old-lock-file] — audit transitive dependency
-# version changes via a repo's flake.lock. Detects major version bumps in
-# common C libraries (ffmpeg, openssl, curl, ...) that tend to break
-# dependent packages. With no old-lock-file, just reports current versions.
+# nix-audit-deps [repo-path] [old-lock-file] — compare watched nixpkgs package
+# versions between the nixpkgs revisions locked in two flake.lock files. Flags
+# major version bumps in common C libraries (ffmpeg, openssl, curl, ...) that
+# tend to break dependent packages. With no old-lock-file, just reports current
+# versions. It reads nixpkgs, not the repo's own overrides.
 set -euo pipefail
 
 REPO_PATH="${1:-.}"
 OLD_LOCK="${2:-}"
+
+if [ -n "$OLD_LOCK" ] && [ ! -f "$OLD_LOCK" ]; then
+    echo "❌ Old lock file not found: $OLD_LOCK" >&2
+    exit 2
+fi
 
 # Override with a space-separated list via WATCH_PACKAGES env var.
 read -ra WATCH_PACKAGES <<< "${WATCH_PACKAGES:-ffmpeg openssl curl zlib libpng libjpeg lua python3 perl postgresql libxml2}"
@@ -14,7 +20,7 @@ read -ra WATCH_PACKAGES <<< "${WATCH_PACKAGES:-ffmpeg openssl curl zlib libpng l
 get_nixpkgs_rev() {
     local lock_file="$1"
     [ -f "$lock_file" ] || return 1
-    jq -r '.nodes.nixpkgs.locked.rev' "$lock_file" 2>/dev/null || echo ""
+    jq -r '.nodes.nixpkgs.locked.rev // empty' "$lock_file" 2>/dev/null || echo ""
 }
 
 get_package_version() {
@@ -47,18 +53,22 @@ audit_transitive_deps() {
     echo "   nixpkgs rev: $current_rev"
     echo
 
-    local has_changes=0
+    local has_changes=0 skipped=0
 
     for pkg in "${WATCH_PACKAGES[@]}"; do
         local current_version
         current_version=$(get_package_version "$pkg" "$current_rev" || echo "")
 
-        [ -z "$current_version" ] || [ "$current_version" = "unknown" ] && continue
+        if [ -z "$current_version" ] || [ "$current_version" = "unknown" ]; then
+            echo "  $pkg: version unknown at ${current_rev:0:12}, not checked" >&2
+            skipped=$((skipped + 1))
+            continue
+        fi
 
         local current_major
         current_major=$(get_major_version "$current_version")
 
-        if [ -n "$OLD_LOCK" ] && [ -f "$OLD_LOCK" ]; then
+        if [ -n "$OLD_LOCK" ]; then
             local old_rev
             old_rev=$(get_nixpkgs_rev "$OLD_LOCK" || echo "")
 
@@ -66,7 +76,10 @@ audit_transitive_deps() {
                 local old_version
                 old_version=$(get_package_version "$pkg" "$old_rev" || echo "")
 
-                if [ -n "$old_version" ] && [ "$old_version" != "unknown" ]; then
+                if [ -z "$old_version" ] || [ "$old_version" = "unknown" ]; then
+                    echo "  $pkg: version unknown at ${old_rev:0:12}, not compared" >&2
+                    skipped=$((skipped + 1))
+                else
                     local old_major
                     old_major=$(get_major_version "$old_version")
 
@@ -89,6 +102,10 @@ audit_transitive_deps() {
         return 1
     fi
 
+    if [ "$skipped" -gt 0 ]; then
+        echo "⚠️  $skipped package check(s) skipped (version unknown); see above"
+        return 1
+    fi
     echo "✓ No major version bumps detected"
     return 0
 }
