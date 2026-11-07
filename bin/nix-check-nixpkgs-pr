@@ -57,7 +57,7 @@ cd "$ROOT"
 # make one); removed from the original checkout, newest first.
 REPO_ROOT=$ROOT
 cleanup_dirs=()
-# shellcheck disable=SC2329 # invoked by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap
 cleanup() {
     local i d
     for ((i = ${#cleanup_dirs[@]} - 1; i >= 0; i--)); do
