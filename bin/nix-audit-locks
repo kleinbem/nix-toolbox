@@ -32,12 +32,17 @@ for dir in "$@"; do
     fi
 
     # Input names map to node ids through the root node; a follows path is
-    # walked from the root.
+    # walked from the root, and every follows edge on it is resolved the same way.
     locked=$(echo "$LOCKS" | jq -r --arg n "$name" '
         . as $l
-        | def node($p): reduce $p[] as $i ($l.root; $l.nodes[.].inputs[$i]);
-          ($l.nodes[$l.root].inputs[$n] // empty)
-        | (if type == "array" then node(.) else . end)
+        | def resolve($p): reduce $p[] as $i ($l.root;
+              if . == null then null
+              else $l.nodes[.].inputs[$i] as $e
+                | if ($e | type) == "array" then resolve($e) else $e end
+              end);
+          ($l.nodes[$l.root].inputs[$n] // empty) as $e
+        | (if ($e | type) == "array" then resolve($e) else $e end)
+        | select(. != null)
         | $l.nodes[.].locked.rev // empty')
     if [ -z "$locked" ]; then
         printf "  %-20s %b(no lock entry — not a flake input?)%b\n" "$name" "$YELLOW" "$RESET"

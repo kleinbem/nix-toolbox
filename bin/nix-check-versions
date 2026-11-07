@@ -13,7 +13,8 @@ trap 'rm -f "$tmp"' EXIT
 
 # -o keeps only the "<name>Version = \"...\"" token, so the parsing below
 # starts at the identifier and a greedy `.*` can't eat into the name.
-grep -rEo '[a-zA-Z0-9_]+Version\s*=\s*"[0-9][^"]*"' "$dir" --include="*.nix" > "$tmp" || [ $? -eq 1 ]
+# -Z ends the file name with NUL: a version like "1:2" has a colon too.
+grep -rEoZ '[a-zA-Z0-9_]+Version\s*=\s*"[0-9][^"]*"' "$dir" --include="*.nix" > "$tmp" || [ $? -eq 1 ]
 
 if [ ! -s "$tmp" ]; then
     exit 0
@@ -22,10 +23,7 @@ fi
 declare -A versions first_file
 drift_found=0
 
-# grep prints "file:match"; the match has no colon, so split at the last one.
-while IFS= read -r line; do
-    file=${line%:*}
-    assignment=${line##*:}
+while IFS= read -r -d '' file && IFS= read -r assignment; do
     package=$(echo "$assignment" | sed -E 's/([a-zA-Z0-9_]+)Version.*/\1/')
     version=$(echo "$assignment" | sed -E 's/.*"([^"]+)".*/\1/')
 

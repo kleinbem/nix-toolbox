@@ -28,7 +28,13 @@ case $rc in
 10)
     echo "🕵️  Workspace is LOCKED. Processes matching \"$PATTERN\" (possible holders):"
     if command -v pgrep >/dev/null; then
-        pgrep -af "$PATTERN" || echo "   (none)"
+        prc=0
+        pgrep -af "$PATTERN" || prc=$?
+        case $prc in
+        0) ;;
+        1) echo "   (none)" ;;
+        *) echo "❌ pgrep failed (exit $prc); check the pattern" >&2; exit 2 ;;
+        esac
     else
         echo "   (pgrep not installed)"
     fi

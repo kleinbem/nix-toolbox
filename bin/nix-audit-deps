@@ -49,6 +49,15 @@ audit_transitive_deps() {
         return 1
     fi
 
+    local old_rev=""
+    if [ -n "$OLD_LOCK" ]; then
+        old_rev=$(get_nixpkgs_rev "$OLD_LOCK" || echo "")
+        if [ -z "$old_rev" ]; then
+            echo "⚠️  Could not extract nixpkgs revision from $OLD_LOCK"
+            return 1
+        fi
+    fi
+
     echo "📦 Auditing transitive dependencies for: $(basename "$repo_path")"
     echo "   nixpkgs rev: $current_rev"
     echo
@@ -69,10 +78,7 @@ audit_transitive_deps() {
         current_major=$(get_major_version "$current_version")
 
         if [ -n "$OLD_LOCK" ]; then
-            local old_rev
-            old_rev=$(get_nixpkgs_rev "$OLD_LOCK" || echo "")
-
-            if [ -n "$old_rev" ] && [ "$old_rev" != "$current_rev" ]; then
+            if [ "$old_rev" != "$current_rev" ]; then
                 local old_version
                 old_version=$(get_package_version "$pkg" "$old_rev" || echo "")
 
