@@ -7,7 +7,7 @@ source "$here/bin/bash-test-lib.sh"
 tool="$here/bin/nix-check-workarounds"
 
 repo="$(mktemp -d)"
-trap 'rm -rf "$repo"' EXIT
+trap 'rm -rf "$repo" "$repo.bin"' EXIT
 git -C "$repo" init -q
 git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
 
@@ -72,14 +72,17 @@ out=$("$tool" "$repo" -- refs.nix 2>&1) && rc=0 || rc=$?
 assert_eq "refs.nix:6: workaround comment without a link" "$(head -1 <<<"$out")" "owner/repo#N counts, no-link skips, a bare #N doesn't count"
 assert_eq "3 workaround comments, 1 without a link" "$(tail -1 <<<"$out")" "summary for references"
 
-if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
-    echo "== --states (gh)"
-    printf '# Workaround, drop once kleinbem/nix-toolbox#1 is in.\n' >"$repo/merged.nix"
-    git -C "$repo" add -A
-    out=$("$tool" --states "$repo" -- merged.nix 2>&1) && rc=0 || rc=$?
-    assert_eq "merged.nix:1: https://github.com/kleinbem/nix-toolbox/issues/1 is MERGED; drop the workaround once the fix is in what we use" \
-        "$(head -1 <<<"$out")" "a merged PR behind owner/repo#N is reported"
-fi
+echo "== --states (stub gh)"
+# A stub, so the test doesn't depend on the live state of a GitHub item.
+mkdir -p "$repo.bin"
+# shellcheck disable=SC2016 # the stub's own $1
+printf '#!/usr/bin/env bash\n[ "$1" = pr ] && { echo MERGED; exit 0; }\nexit 1\n' >"$repo.bin/gh"
+chmod +x "$repo.bin/gh"
+printf '# Workaround, drop once kleinbem/nix-toolbox#1 is in.\n' >"$repo/merged.nix"
+git -C "$repo" add -A
+out=$(PATH="$repo.bin:$PATH" "$tool" --states "$repo" -- merged.nix 2>&1) && rc=0 || rc=$?
+assert_eq "merged.nix:1: https://github.com/kleinbem/nix-toolbox/issues/1 is MERGED; drop the workaround once the fix is in what we use" \
+    "$(head -1 <<<"$out")" "a merged PR behind owner/repo#N is reported"
 
 echo "== heredocs, an empty no-link and a bad base"
 cat >"$repo/fixture.sh" <<'SH'
