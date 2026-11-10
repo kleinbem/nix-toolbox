@@ -11,6 +11,7 @@
 #                       whether their derivations changed (so tests must rerun)
 #   --attr <attr>       extra attribute for --drvs-against, e.g. nixosTests.foo
 #                       (repeatable)
+#   --pr-body <file>    verify PR body against nixpkgs template and AI policy
 #
 # Checks:
 #   1. every changed pkgs/by-name package's meta.position points into its own
@@ -24,7 +25,9 @@
 #      modified files are skipped, their old code isn't the PR's);
 #   5. statix suggestions on new .nix files (if installed; notes only);
 #   6. common review anti-patterns: legacy python format, rev vs tag in fetchFromGitHub,
-#      unexplained doCheck = false, invalid maintainer emails.
+#      unexplained doCheck = false, testers.runCommand vs runCommand, handwritten shell completions,
+#      invalid maintainer emails;
+#   7. PR body checks (with --pr-body): template structure, AI policy checkbox and disclosure.
 # Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
 set -euo pipefail
 
@@ -34,13 +37,15 @@ AGAINST=""
 EXTRA_ATTRS=()
 DIR="."
 PR=""
+PR_BODY=""
 need_value() { [ $# -ge 2 ] || { echo "$1 needs a value, see --help" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
-    --base | --log | --drvs-against | --attr | --pr) need_value "$@" ;;
+    --base | --log | --drvs-against | --attr | --pr | --pr-body) need_value "$@" ;;
     esac
     case "$1" in
     --pr) PR="$2"; shift 2 ;;
+    --pr-body) PR_BODY="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --log) LOGS+=("$2"); shift 2 ;;
     --drvs-against) AGAINST="$2"; shift 2 ;;
@@ -49,6 +54,7 @@ while [ $# -gt 0 ]; do
     *) DIR="$1"; shift ;;
     esac
 done
+TOOL_DIR=$(dirname "$(readlink -f "$0")")
 cd "$DIR"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
@@ -166,7 +172,7 @@ else
 fi
 rm -f "$nixlist"
 if [ ${#nixfiles[@]} -gt 0 ]; then
-    out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- "${nixfiles[@]/#/:(literal)}" 2>&1) || rc=$?
+    out=$("$TOOL_DIR/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- "${nixfiles[@]/#/:(literal)}" 2>&1) || rc=$?
 fi
 if [ "$rc" -gt 1 ]; then
     fail "nix-check-workarounds failed (exit $rc): $out"
@@ -244,7 +250,47 @@ else
                 note "$f:$lnum: doCheck = false without an explanatory comment"
             fi
         done < <(grep -nE '^[[:space:]]*doCheck\s*=\s*false;' "$f" | cut -d: -f1 || true)
+
+        # testers.runCommand (networked FOD) vs plain runCommand
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            fail "$f:${line%%:*}: uses testers.runCommand (networked FOD); use plain runCommand for offline passthru.tests"
+        done < <(grep -nE 'testers\.runCommand' "$f" || true)
+
+        # Inline handwritten shell completions in postInstall
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            note "$f:${line%%:*}: inline shell completion creation; package only upstream completions"
+        done < <(grep -nE 'cat\s*<<.*(bash-completion|fish/vendor_completions|zsh/site-functions)' "$f" || true)
     done
+fi
+
+if [ -n "$PR_BODY" ]; then
+    echo "== PR body template and policy"
+    if [ ! -f "$PR_BODY" ]; then
+        fail "PR body file '$PR_BODY' not found"
+    else
+        body_content=$(cat "$PR_BODY")
+        if ! grep -q "## Things done" <<<"$body_content"; then
+            fail "$PR_BODY: missing '## Things done' from .github/PULL_REQUEST_TEMPLATE.md"
+        else
+            ok "$PR_BODY: preserves template headings"
+        fi
+
+        if grep -qE -- '-\s*\[x\]\s*Follows the \[automation/AI policy\]' <<<"$body_content"; then
+            if ! grep -qiE '(assisted[- ]by|assisted by)' <<<"$body_content"; then
+                fail "$PR_BODY: checks automation/AI policy but is missing 'Assisted by ...' disclosure"
+            else
+                ok "$PR_BODY: complies with automation/AI policy (checkbox + disclosure)"
+            fi
+        else
+            note "$PR_BODY: does not check automation/AI policy (ensure compliance if AI-assisted)"
+        fi
+
+        if grep -qE -- '-\s*\[x\]\s*x86_64-darwin' <<<"$body_content"; then
+            note "$PR_BODY: marks x86_64-darwin tested, which is unsupported on Nixpkgs 26.11+"
+        fi
+    fi
 fi
 
 if printf '%s\n' "$CHANGED" | grep -qx "maintainers/maintainer-list.nix"; then
