@@ -61,7 +61,7 @@ assert_eq 0 "$rc" "human PR passes policy checkbox without disclosure"
 assert_eq 1 "$(grep -c 'no AI trailer detected in branch' <<<"$out" || true)" "reports no AI trailer"
 
 # Add commit with Assisted-by trailer
-git -C "$repo" commit -q --allow-empty -m "assisted commit
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "assisted commit
 
 Assisted-by: Antigravity (gemini-3.8-flash)"
 
