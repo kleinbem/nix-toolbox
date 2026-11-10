@@ -51,13 +51,27 @@ MD
 out=$("$tool" --base HEAD~1 --pr-body "$body_bad" "$repo" 2>&1) && rc=0 || rc=$?
 assert_eq 1 "$rc" "fails when PR body is missing template headings"
 
+body_human="$repo/human.md"
+cat >"$body_human" <<'MD'
+## Things done
+* [X] Follows the [automation/AI policy]
+MD
+out=$("$tool" --base HEAD~1 --pr-body "$body_human" "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 0 "$rc" "human PR passes policy checkbox without disclosure"
+assert_eq 1 "$(grep -c 'no AI trailer detected in branch' <<<"$out" || true)" "reports no AI trailer"
+
+# Add commit with Assisted-by trailer
+git -C "$repo" commit -q --allow-empty -m "assisted commit
+
+Assisted-by: Antigravity (gemini-3.8-flash)"
+
 body_ai_nodisclose="$repo/nodisclose.md"
 cat >"$body_ai_nodisclose" <<'MD'
 ## Things done
 - [x] Follows the [automation/AI policy]
 MD
 out=$("$tool" --base HEAD~1 --pr-body "$body_ai_nodisclose" "$repo" 2>&1) && rc=0 || rc=$?
-assert_eq 1 "$rc" "fails when AI policy is checked without disclosure"
+assert_eq 1 "$rc" "fails when AI-assisted commit has no PR disclosure"
 
 body_good="$repo/good.md"
 cat >"$body_good" <<'MD'
@@ -66,6 +80,6 @@ cat >"$body_good" <<'MD'
 Assisted by Antigravity (gemini-3.8-flash).
 MD
 out=$("$tool" --base HEAD~1 --pr-body "$body_good" "$repo" 2>&1) && rc=0 || rc=$?
-assert_eq 1 "$(grep -c 'complies with automation/AI policy' <<<"$out" || true)" "passes good PR body"
+assert_eq 1 "$(grep -c 'checks automation/AI policy and contains disclosure phrase' <<<"$out" || true)" "passes good PR body"
 
 test_summary

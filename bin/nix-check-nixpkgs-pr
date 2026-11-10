@@ -277,17 +277,22 @@ if [ -n "$PR_BODY" ]; then
             ok "$PR_BODY: preserves template headings"
         fi
 
-        if grep -qE -- '-\s*\[x\]\s*Follows the \[automation/AI policy\]' <<<"$body_content"; then
-            if ! grep -qiE '(assisted[- ]by|assisted by)' <<<"$body_content"; then
-                fail "$PR_BODY: checks automation/AI policy but is missing 'Assisted by ...' disclosure"
+        if grep -qE -- '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Follows the \[automation/AI policy\]' <<<"$body_content"; then
+            has_trailer=$(git log "$BASE..HEAD" --grep="Assisted-by:" --format="%h" | head -1 || true)
+            has_disclosure=$(grep -qiE 'assisted[- ]by' <<<"$body_content" && echo 1 || true)
+
+            if [ -n "$has_trailer" ] && [ -z "$has_disclosure" ]; then
+                fail "$PR_BODY: commit has Assisted-by trailer but PR body lacks 'Assisted by ...' disclosure"
+            elif [ -n "$has_disclosure" ]; then
+                ok "$PR_BODY: checks automation/AI policy and contains disclosure phrase"
             else
-                ok "$PR_BODY: complies with automation/AI policy (checkbox + disclosure)"
+                ok "$PR_BODY: checks automation/AI policy (no AI trailer detected in branch)"
             fi
         else
             note "$PR_BODY: does not check automation/AI policy (ensure compliance if AI-assisted)"
         fi
 
-        if grep -qE -- '-\s*\[x\]\s*x86_64-darwin' <<<"$body_content"; then
+        if grep -qE -- '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*x86_64-darwin' <<<"$body_content"; then
             note "$PR_BODY: marks x86_64-darwin tested, which is unsupported on Nixpkgs 26.11+"
         fi
     fi
