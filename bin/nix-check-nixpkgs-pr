@@ -14,20 +14,22 @@
 #   --pr-body <file>    verify PR body against nixpkgs template and AI policy
 #
 # Checks:
-#   1. every changed pkgs/by-name package's meta.position points into its own
+#   1. nixfmt formatting on changed .nix files (if nixfmt installed);
+#   2. ./ci/nixpkgs-vet.sh against base revision (if in nixpkgs checkout);
+#   3. every changed pkgs/by-name package's meta.position points into its own
 #      directory (a bare `.override` variant keeps the base package's position,
 #      so nixpkgs-update never sees its `# nixpkgs-update: no auto update`);
-#   2. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
+#   4. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
 #      plain code, only [](#opt-…) becomes a link (a note, both forms are allowed);
-#   3. comments that announce a workaround ("fixed upstream", "drop with", …)
+#   5. comments that announce a workaround ("fixed upstream", "drop with", …)
 #      carry a link in the same comment block (nix-check-workarounds);
-#   4. new .nix files have no unused arguments or bindings (deadnix, if installed;
+#   6. new .nix files have no unused arguments or bindings (deadnix, if installed;
 #      modified files are skipped, their old code isn't the PR's);
-#   5. statix suggestions on new .nix files (if installed; notes only);
-#   6. common review anti-patterns: legacy python format, rev vs tag in fetchFromGitHub,
+#   7. statix suggestions on new .nix files (if installed; notes only);
+#   8. common review anti-patterns: legacy python format, rev vs tag in fetchFromGitHub,
 #      unexplained doCheck = false, testers.runCommand vs runCommand, handwritten shell completions,
 #      invalid maintainer emails;
-#   7. PR body checks (with --pr-body): template structure, AI policy checkbox and disclosure.
+#   9. PR body checks (with --pr-body): template structure, AI policy checkbox and disclosure.
 # Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
 set -euo pipefail
 
@@ -106,7 +108,13 @@ fi
 if [ -z "$BASE" ]; then
     for ref in upstream/master origin/master master; do
         if git rev-parse -q --verify "$ref" >/dev/null; then
-            BASE=$(git merge-base HEAD "$ref")
+            candidate=$(git merge-base HEAD "$ref")
+            # If the branch is local master without remote refs, merge-base is HEAD itself
+            if [ "$ref" = "master" ] && [ "$candidate" = "$(git rev-parse HEAD)" ]; then
+                echo "HEAD is master and no upstream/master or origin/master ref found; pass --base explicitly" >&2
+                exit 2
+            fi
+            BASE="$candidate"
             break
         fi
     done
@@ -119,6 +127,41 @@ ok() { printf '  ✓ %s\n' "$*"; }
 note() { printf '  · %s\n' "$*"; }
 
 CHANGED=$(git diff --name-only "$BASE" HEAD)
+NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
+
+echo "== nixfmt formatting"
+if [ -z "$NIXFILES" ]; then
+    note "no .nix files changed"
+elif command -v nixfmt >/dev/null; then
+    fmt_failed=0
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        if ! nixfmt --check "$f" >/dev/null 2>&1; then
+            fail "$f: not formatted with nixfmt (run 'nixfmt $f')"
+            fmt_failed=1
+        fi
+    done <<<"$NIXFILES"
+    if [ "$fmt_failed" -eq 0 ]; then
+        ok "all changed .nix files are formatted correctly"
+    fi
+else
+    note "nixfmt not installed, skipped"
+fi
+
+if [ -f "$ROOT/ci/nixpkgs-vet.sh" ]; then
+    echo "== nixpkgs-vet structural check"
+    vet_branch="master"
+    case "${BASE:-}" in
+    staging | staging-next | release-* | master) vet_branch="$BASE" ;;
+    esac
+    if vet_out=$("$ROOT/ci/nixpkgs-vet.sh" "$vet_branch" 2>&1); then
+        ok "nixpkgs-vet passed"
+    else
+        fail "nixpkgs-vet failed:"
+        printf '%s\n' "$vet_out" | sed 's/^/    /'
+    fi
+fi
+
 # Package attributes from changed by-name directories (pkgs/by-name/xx/<attr>/…).
 ATTRS=$(printf '%s\n' "$CHANGED" | sed -nE 's#^pkgs/by-name/[^/]+/([^/]+)/.*#\1#p' | sort -u)
 
@@ -158,7 +201,6 @@ done
 echo "== workaround comments carry a link"
 states=()
 command -v gh >/dev/null && states=(--states)
-NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
 rc=0
 out=""
 # Only the PR's own .nix files, not uncommitted edits elsewhere; NUL-separated,
