@@ -11,20 +11,25 @@
 #                       whether their derivations changed (so tests must rerun)
 #   --attr <attr>       extra attribute for --drvs-against, e.g. nixosTests.foo
 #                       (repeatable)
+#   --pr-body <file>    verify PR body against nixpkgs template and AI policy
 #
 # Checks:
-#   1. every changed pkgs/by-name package's meta.position points into its own
+#   1. nixfmt formatting on changed .nix files (if nixfmt installed);
+#   2. ./ci/nixpkgs-vet.sh against base revision (if in nixpkgs checkout);
+#   3. every changed pkgs/by-name package's meta.position points into its own
 #      directory (a bare `.override` variant keeps the base package's position,
 #      so nixpkgs-update never sees its `# nixpkgs-update: no auto update`);
-#   2. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
+#   4. notes {option}`…` in changed NixOS module docs: nixos-render-docs renders it as
 #      plain code, only [](#opt-…) becomes a link (a note, both forms are allowed);
-#   3. comments that announce a workaround ("fixed upstream", "drop with", …)
+#   5. comments that announce a workaround ("fixed upstream", "drop with", …)
 #      carry a link in the same comment block (nix-check-workarounds);
-#   4. new .nix files have no unused arguments or bindings (deadnix, if installed;
+#   6. new .nix files have no unused arguments or bindings (deadnix, if installed;
 #      modified files are skipped, their old code isn't the PR's);
-#   5. statix suggestions on new .nix files (if installed; notes only);
-#   6. common review anti-patterns: legacy python format, rev vs tag in fetchFromGitHub,
-#      unexplained doCheck = false, invalid maintainer emails.
+#   7. statix suggestions on new .nix files (if installed; notes only);
+#   8. common review anti-patterns: legacy python format, rev vs tag in fetchFromGitHub,
+#      unexplained doCheck = false, testers.runCommand vs runCommand, handwritten shell completions,
+#      invalid maintainer emails;
+#   9. PR body checks (with --pr-body): template structure, AI policy checkbox and disclosure.
 # Exit code 1 if a check fails; warnings, logs and drv comparisons only report.
 set -euo pipefail
 
@@ -34,13 +39,15 @@ AGAINST=""
 EXTRA_ATTRS=()
 DIR="."
 PR=""
+PR_BODY=""
 need_value() { [ $# -ge 2 ] || { echo "$1 needs a value, see --help" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
-    --base | --log | --drvs-against | --attr | --pr) need_value "$@" ;;
+    --base | --log | --drvs-against | --attr | --pr | --pr-body) need_value "$@" ;;
     esac
     case "$1" in
     --pr) PR="$2"; shift 2 ;;
+    --pr-body) PR_BODY="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --log) LOGS+=("$2"); shift 2 ;;
     --drvs-against) AGAINST="$2"; shift 2 ;;
@@ -49,6 +56,7 @@ while [ $# -gt 0 ]; do
     *) DIR="$1"; shift ;;
     esac
 done
+TOOL_DIR=$(dirname "$(readlink -f "$0")")
 cd "$DIR"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
@@ -100,7 +108,13 @@ fi
 if [ -z "$BASE" ]; then
     for ref in upstream/master origin/master master; do
         if git rev-parse -q --verify "$ref" >/dev/null; then
-            BASE=$(git merge-base HEAD "$ref")
+            candidate=$(git merge-base HEAD "$ref")
+            # If the branch is local master without remote refs, merge-base is HEAD itself
+            if [ "$ref" = "master" ] && [ "$candidate" = "$(git rev-parse HEAD)" ]; then
+                echo "HEAD is master and no upstream/master or origin/master ref found; pass --base explicitly" >&2
+                exit 2
+            fi
+            BASE="$candidate"
             break
         fi
     done
@@ -113,6 +127,41 @@ ok() { printf '  ✓ %s\n' "$*"; }
 note() { printf '  · %s\n' "$*"; }
 
 CHANGED=$(git diff --name-only "$BASE" HEAD)
+NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
+
+echo "== nixfmt formatting"
+if [ -z "$NIXFILES" ]; then
+    note "no .nix files changed"
+elif command -v nixfmt >/dev/null; then
+    fmt_failed=0
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        if ! nixfmt --check "$f" >/dev/null 2>&1; then
+            fail "$f: not formatted with nixfmt (run 'nixfmt $f')"
+            fmt_failed=1
+        fi
+    done <<<"$NIXFILES"
+    if [ "$fmt_failed" -eq 0 ]; then
+        ok "all changed .nix files are formatted correctly"
+    fi
+else
+    note "nixfmt not installed, skipped"
+fi
+
+if [ -f "$ROOT/ci/nixpkgs-vet.sh" ]; then
+    echo "== nixpkgs-vet structural check"
+    vet_branch="master"
+    case "${BASE:-}" in
+    staging | staging-next | release-* | master) vet_branch="$BASE" ;;
+    esac
+    if vet_out=$("$ROOT/ci/nixpkgs-vet.sh" "$vet_branch" 2>&1); then
+        ok "nixpkgs-vet passed"
+    else
+        fail "nixpkgs-vet failed:"
+        printf '%s\n' "$vet_out" | sed 's/^/    /'
+    fi
+fi
+
 # Package attributes from changed by-name directories (pkgs/by-name/xx/<attr>/…).
 ATTRS=$(printf '%s\n' "$CHANGED" | sed -nE 's#^pkgs/by-name/[^/]+/([^/]+)/.*#\1#p' | sort -u)
 
@@ -152,7 +201,6 @@ done
 echo "== workaround comments carry a link"
 states=()
 command -v gh >/dev/null && states=(--states)
-NIXFILES=$(printf '%s\n' "$CHANGED" | grep -E '\.nix$' || true)
 rc=0
 out=""
 # Only the PR's own .nix files, not uncommitted edits elsewhere; NUL-separated,
@@ -166,7 +214,7 @@ else
 fi
 rm -f "$nixlist"
 if [ ${#nixfiles[@]} -gt 0 ]; then
-    out=$("$(dirname "$(readlink -f "$0")")/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- "${nixfiles[@]/#/:(literal)}" 2>&1) || rc=$?
+    out=$("$TOOL_DIR/nix-check-workarounds" --base "$BASE" "${states[@]}" . -- "${nixfiles[@]/#/:(literal)}" 2>&1) || rc=$?
 fi
 if [ "$rc" -gt 1 ]; then
     fail "nix-check-workarounds failed (exit $rc): $out"
@@ -244,7 +292,55 @@ else
                 note "$f:$lnum: doCheck = false without an explanatory comment"
             fi
         done < <(grep -nE '^[[:space:]]*doCheck\s*=\s*false;' "$f" | cut -d: -f1 || true)
+
+        # testers.runCommand (networked FOD) vs plain runCommand
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            fail "$f:${line%%:*}: uses testers.runCommand (networked FOD); use plain runCommand for offline passthru.tests"
+        done < <(grep -nE 'testers\.runCommand' "$f" || true)
+
+        # Inline handwritten shell completions in postInstall
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            note "$f:${line%%:*}: inline shell completion creation; package only upstream completions"
+        done < <(grep -nE 'cat\s*<<.*(bash-completion|fish/vendor_completions|zsh/site-functions)' "$f" || true)
     done
+fi
+
+if [ -n "$PR_BODY" ]; then
+    echo "== PR body template and policy"
+    if [ ! -f "$PR_BODY" ]; then
+        fail "PR body file '$PR_BODY' not found"
+    else
+        body_content=$(cat "$PR_BODY")
+        if ! grep -q "## Things done" <<<"$body_content"; then
+            fail "$PR_BODY: missing '## Things done' from .github/PULL_REQUEST_TEMPLATE.md"
+        else
+            ok "$PR_BODY: preserves template headings"
+        fi
+
+        if grep -qE -- '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Follows the \[automation/AI policy\]' <<<"$body_content"; then
+            has_trailer=$(git log "$BASE..HEAD" --grep="Assisted-by:" --format="%h" | head -1 || true)
+            has_disclosure=""
+            if grep -qiE 'assisted[- ]by' <<<"$body_content"; then
+                has_disclosure=1
+            fi
+
+            if [ -n "$has_trailer" ] && [ -z "$has_disclosure" ]; then
+                fail "$PR_BODY: commit has Assisted-by trailer but PR body lacks 'Assisted by ...' disclosure"
+            elif [ -n "$has_disclosure" ]; then
+                ok "$PR_BODY: checks automation/AI policy and contains disclosure phrase"
+            else
+                ok "$PR_BODY: checks automation/AI policy (no AI trailer detected in branch)"
+            fi
+        else
+            note "$PR_BODY: does not check automation/AI policy (ensure compliance if AI-assisted)"
+        fi
+
+        if grep -qE -- '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*x86_64-darwin' <<<"$body_content"; then
+            note "$PR_BODY: marks x86_64-darwin tested, which is unsupported on Nixpkgs 26.11+"
+        fi
+    fi
 fi
 
 if printf '%s\n' "$CHANGED" | grep -qx "maintainers/maintainer-list.nix"; then
