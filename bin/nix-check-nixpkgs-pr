@@ -279,7 +279,10 @@ if [ -n "$PR_BODY" ]; then
 
         if grep -qE -- '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Follows the \[automation/AI policy\]' <<<"$body_content"; then
             has_trailer=$(git log "$BASE..HEAD" --grep="Assisted-by:" --format="%h" | head -1 || true)
-            has_disclosure=$(grep -qiE 'assisted[- ]by' <<<"$body_content" && echo 1 || true)
+            has_disclosure=""
+            if grep -qiE 'assisted[- ]by' <<<"$body_content"; then
+                has_disclosure=1
+            fi
 
             if [ -n "$has_trailer" ] && [ -z "$has_disclosure" ]; then
                 fail "$PR_BODY: commit has Assisted-by trailer but PR body lacks 'Assisted by ...' disclosure"
