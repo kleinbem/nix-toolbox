@@ -54,8 +54,11 @@ while IFS= read -r -d '' f; do
 done <"$list"
 
 if [ -n "$BASE" ] && [ ${#files[@]} -gt 0 ]; then
-    printf '#hunks\n' >"$hunks"
-    git -c core.quotePath=false diff -U0 --no-color --no-ext-diff "$BASE" -- "${files[@]/#/:(literal)}" >>"$hunks" || exit 2
+    : >"$hunks"
+    for f in "${files[@]}"; do
+        printf '\037%s\n' "$f" >>"$hunks"
+        git diff -U0 --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ "$BASE" -- ":(literal)$f" >>"$hunks" || exit 2
+    done
 fi
 
 # One line per workaround comment: file, line and links (space-separated),
@@ -63,8 +66,9 @@ fi
 scan() {
     awk -v use_hunks="${BASE:+1}" '
         use_hunks && NR == FNR {
-            if (/^\+\+\+ b\//) {
-                curfile = substr($0, 7)
+            if (substr($0, 1, 1) == "\037") {
+                curfile = substr($0, 2)
+                in_del = 0
             } else if (curfile != "" && /^@@ / && match($0, /\+[0-9]+(,[0-9]+)? /)) {
                 tok = substr($0, RSTART + 1, RLENGTH - 2)
                 n = split(tok, parts, ",")
@@ -74,7 +78,18 @@ scan() {
                     idx = ++h_n[curfile]
                     h_s[curfile, idx] = hs
                     h_e[curfile, idx] = hs + hc - 1
+                    in_del = 0
+                } else {
+                    del_pos = hs
+                    in_del = 1
                 }
+            } else if (in_del && /^-[[:space:]]*#/) {
+                idx = ++h_n[curfile]
+                h_s[curfile, idx] = del_pos
+                h_e[curfile, idx] = del_pos + 1
+                in_del = 0
+            } else if (!/^-/) {
+                in_del = 0
             }
             next
         }

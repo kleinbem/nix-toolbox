@@ -73,6 +73,42 @@ out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
 assert_eq 1 "$rc" "editing an unlinked workaround block flags it"
 assert_eq "unlinked.nix:5: workaround comment without a link" "$(head -1 <<<"$out")" "reports the touched block's start line"
 
+# diff.noprefix / diff.mnemonicPrefix in user git config must not hide hunks.
+git -C "$repo" config diff.noprefix true
+git -C "$repo" config diff.mnemonicPrefix true
+out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "diff.noprefix and diff.mnemonicPrefix do not hide changed blocks"
+git -C "$repo" config --unset diff.noprefix
+git -C "$repo" config --unset diff.mnemonicPrefix
+
+# A filename containing a tab (which git quotes in patch headers) is still matched.
+tabfile=$'with\ttab.nix'
+printf '# Workaround without a link in tab-named file.\n' >"$repo/$tabfile"
+git -C "$repo" add -- "$tabfile"
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "add tab-named file"
+out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "changed workaround in tab-named file is detected"
+assert_eq "${tabfile}:1: workaround comment without a link" "$(head -1 <<<"$out")" "reports tab-named file"
+git -C "$repo" rm -q -- "$tabfile"
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "remove tab-named file"
+
+# Deleting a non-comment line adjacent to an existing unlinked workaround ignores it,
+# whereas deleting the link line from a linked workaround block flags the survivor.
+sed -i '/x = 42;/d' "$repo/unlinked.nix"
+git -C "$repo" add unlinked.nix
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "delete code line near workaround"
+out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 0 "$rc" "deleting code outside a workaround block does not flag it"
+
+sed -i '/https:\/\/github.com\/NixOS\/nixpkgs\/pull\/1/d' "$repo/linked.nix"
+git -C "$repo" add linked.nix
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "delete link line from workaround"
+out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "deleting only the link line from a workaround block flags the block"
+assert_eq "linked.nix:2: workaround comment without a link" "$(head -1 <<<"$out")" "reports surviving unlinked block"
+git -C "$repo" checkout -q HEAD~1 -- linked.nix
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "restore linked.nix"
+
 echo "== references and the no-link marker"
 cat >"$repo/refs.nix" <<'NIX'
 {
