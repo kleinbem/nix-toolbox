@@ -109,7 +109,9 @@ scan() {
         function flush() {
             text = tolower(block)
             gsub(/nix-check-workarounds/, "", text) # the tool name itself
-            if (block != "" && in_hunks(bfile, start, end) && text ~ /(workaround|work around|fixed upstream|until upstream|drop (it |this |them )?(with|once|when)|remove (it |this )?(once|when)|upstream (bug|issue|fix)|a pr will follow)/) {
+            # Whole words only: "upstream fixtures" and "drop them with mkForce"
+            # are no workarounds.
+            if (block != "" && in_hunks(bfile, start, end) && text ~ /(^|[^a-z0-9_])(workarounds?|work around|fixed upstream|until upstream|drop (it |this )?with|drop (it |this |them )?(once|when)|remove (it |this )?(once|when)|upstream (bugs?|issues?|fix(es)?)|a pr will follow)([^a-z0-9_]|$)/) {
                 links = ""
                 rest = block
                 while (match(rest, /https?:\/\/[^ )>"'\''`]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+/)) {

@@ -57,7 +57,7 @@ assert_eq 1 "$rc" "a new unlinked workaround fails the PR check"
 assert_eq "new.nix:1: workaround comment without a link" "$(head -1 <<<"$out")" "only the changed file is reported"
 
 # Modifying an unrelated line in a file that already carries old unlinked
-# workarounds (like nixpkgs' all-packages.nix) must not flag the untouched ones.
+# workarounds (like nixpkgs' all-packages.nix) must not flag the untouched ones. no-link: test prose.
 sed -i 's/x = 1;/x = 42;/' "$repo/unlinked.nix"
 git -C "$repo" add unlinked.nix
 git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "touch unrelated line in unlinked.nix"
@@ -65,7 +65,7 @@ out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
 assert_eq 0 "$rc" "untouched pre-existing workarounds in a modified file are ignored"
 assert_eq "0 workaround comments, 0 without a link" "$(tail -1 <<<"$out")" "zero touched workaround blocks counted"
 
-# Editing inside an existing multi-line workaround block checks the whole block.
+# Editing inside an existing multi-line workaround block checks the whole block. no-link: test prose.
 sed -i 's/hangs in the sandbox./hangs in the sandbox;\n  # still needs investigation./' "$repo/unlinked.nix"
 git -C "$repo" add unlinked.nix
 git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "touch existing workaround block"
@@ -93,7 +93,7 @@ git -C "$repo" rm -q -- "$tabfile"
 git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "remove tab-named file"
 
 # Deleting a non-comment line adjacent to an existing unlinked workaround ignores it,
-# whereas deleting the link line from a linked workaround block flags the survivor.
+# whereas deleting the link line from a linked workaround block flags the survivor. no-link: test prose.
 sed -i '/x = 42;/d' "$repo/unlinked.nix"
 git -C "$repo" add unlinked.nix
 git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "delete code line near workaround"
@@ -124,6 +124,24 @@ git -C "$repo" add -A
 out=$("$tool" "$repo" -- refs.nix 2>&1) && rc=0 || rc=$?
 assert_eq "refs.nix:6: workaround comment without a link" "$(head -1 <<<"$out")" "owner/repo#N counts, no-link skips, a bare #N doesn't count"
 assert_eq "3 workaround comments, 1 without a link" "$(tail -1 <<<"$out")" "summary for references"
+
+echo "== whole words"
+cat >"$repo/words.nix" <<'NIX'
+{
+  # These upstream fixtures need store interpreters.
+  a = 1;
+  # Appended at normal priority, so a consumer could only drop them with mkForce.
+  b = 2;
+  # Pinned until upstream fixes the build.
+  c = 3;
+  # Two workarounds for the sandbox.
+  d = 4;
+}
+NIX
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- words.nix 2>&1) && rc=0 || rc=$?
+assert_eq "words.nix:6: workaround comment without a link" "$(head -1 <<<"$out")" "a phrase inside a longer word doesn't count"
+assert_eq "2 workaround comments, 2 without a link" "$(tail -1 <<<"$out")" "plurals still count"
 
 echo "== --states (stub gh)"
 # A stub, so the test doesn't depend on the live state of a GitHub item.
