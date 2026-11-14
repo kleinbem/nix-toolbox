@@ -3,8 +3,8 @@
 # Every workaround in a repo should link the upstream issue or PR it waits on,
 # so it can be dropped when the fix arrives. This finds the ones that don't.
 #
-#   --base <rev>   only files changed since <rev> (a PR's check); default: every
-#                  tracked file (an audit)
+#   --base <rev>   only comment blocks touched since <rev> (a PR's check);
+#                  default: every tracked file (an audit)
 #   --states       look up each linked GitHub issue or PR with `gh` and list the
 #                  merged or closed ones: their workaround can probably go
 #   <pathspec>     limit the files (default: *.nix, shell, YAML, TOML, Python,
@@ -39,7 +39,8 @@ cd "$DIR"
 cd "$(git rev-parse --show-toplevel)"
 
 list=$(mktemp)
-trap 'rm -f "$list"' EXIT
+hunks=$(mktemp)
+trap 'rm -f "$list" "$hunks"' EXIT
 if [ -n "$BASE" ]; then
     git rev-parse -q --verify "$BASE^{commit}" >/dev/null || { echo "--base: unknown revision $BASE" >&2; exit 2; }
     git diff -z --name-only --diff-filter=d "$BASE" -- "${PATHSPEC[@]}" >"$list" || exit 2
@@ -52,10 +53,39 @@ while IFS= read -r -d '' f; do
     [ -f "$f" ] && [ ! -L "$f" ] && files+=("$f")
 done <"$list"
 
+if [ -n "$BASE" ] && [ ${#files[@]} -gt 0 ]; then
+    printf '#hunks\n' >"$hunks"
+    git -c core.quotePath=false diff -U0 --no-color --no-ext-diff "$BASE" -- "${files[@]/#/:(literal)}" >>"$hunks" || exit 2
+fi
+
 # One line per workaround comment: file, line and links (space-separated),
 # separated by \x1f, which no sane file name contains (a tab can).
 scan() {
-    awk '
+    awk -v use_hunks="${BASE:+1}" '
+        use_hunks && NR == FNR {
+            if (/^\+\+\+ b\//) {
+                curfile = substr($0, 7)
+            } else if (curfile != "" && /^@@ / && match($0, /\+[0-9]+(,[0-9]+)? /)) {
+                tok = substr($0, RSTART + 1, RLENGTH - 2)
+                n = split(tok, parts, ",")
+                hs = parts[1] + 0
+                hc = (n > 1) ? (parts[2] + 0) : 1
+                if (hc > 0) {
+                    idx = ++h_n[curfile]
+                    h_s[curfile, idx] = hs
+                    h_e[curfile, idx] = hs + hc - 1
+                }
+            }
+            next
+        }
+        function in_hunks(file, s, e,    i, cnt) {
+            if (!use_hunks) return 1
+            cnt = h_n[file] + 0
+            for (i = 1; i <= cnt; i++) {
+                if (s <= h_e[file, i] && e >= h_s[file, i]) return 1
+            }
+            return 0
+        }
         function in_arith(pre,    o, c) {
             o = gsub(/\(\(/, "", pre)
             c = gsub(/\)\)/, "", pre)
@@ -64,7 +94,7 @@ scan() {
         function flush() {
             text = tolower(block)
             gsub(/nix-check-workarounds/, "", text) # the tool name itself
-            if (block != "" && text ~ /(workaround|work around|fixed upstream|until upstream|drop (it |this |them )?(with|once|when)|remove (it |this )?(once|when)|upstream (bug|issue|fix)|a pr will follow)/) {
+            if (block != "" && in_hunks(bfile, start, end) && text ~ /(workaround|work around|fixed upstream|until upstream|drop (it |this |them )?(with|once|when)|remove (it |this )?(once|when)|upstream (bug|issue|fix)|a pr will follow)/) {
                 links = ""
                 rest = block
                 while (match(rest, /https?:\/\/[^ )>"'\''`]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+/)) {
@@ -80,7 +110,7 @@ scan() {
         FNR == 1 && /^#!/ { next }
         # Heredoc bodies are data (test fixtures), not comments.
         heredoc != "" { line = $0; sub(/^[[:space:]]+/, "", line); if (line == heredoc) heredoc = ""; next }
-        /^[[:space:]]*#/ { if (block == "") { start = FNR; bfile = FILENAME }; block = block " " $0; next }
+        /^[[:space:]]*#/ { if (block == "") { start = FNR; bfile = FILENAME }; end = FNR; block = block " " $0; next }
         { flush() }
         # A heredoc starts with <<WORD outside arithmetic: inside an open
         # $(( … the << is a shift.
@@ -89,7 +119,7 @@ scan() {
             gsub(/^<<-?[[:space:]]*["'\'']?/, "", heredoc)
         }
         # A trailing comment is its own block.
-        /[[:space:]]#[[:space:]]/ { start = FNR; bfile = FILENAME; block = substr($0, index($0, " #")); flush() }
+        /[[:space:]]#[[:space:]]/ { start = FNR; end = FNR; bfile = FILENAME; block = substr($0, index($0, " #")); flush() }
         END { flush() }
     ' "$@"
 }
@@ -97,7 +127,11 @@ scan() {
 missing=0
 found=""
 if [ ${#files[@]} -gt 0 ]; then
-    found=$(scan "${files[@]}")
+    if [ -n "$BASE" ]; then
+        found=$(scan "$hunks" "${files[@]}")
+    else
+        found=$(scan "${files[@]}")
+    fi
 fi
 
 if [ -n "$found" ]; then

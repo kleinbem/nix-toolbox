@@ -45,7 +45,7 @@ assert_empty "$(grep -F 'linked.nix:' <<<"$out" | grep -v unlinked || true)" "a 
 assert_empty "$(grep -F 'script.sh' <<<"$out" || true)" "any http link counts, shebang ignored"
 assert_eq "4 workaround comments, 2 without a link" "$(tail -1 <<<"$out")" "summary counts all and the missing ones"
 
-echo "== --base: only changed files"
+echo "== --base: only touched comment blocks in changed files"
 git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m empty
 out=$("$tool" --base HEAD "$repo" 2>&1) && rc=0 || rc=$?
 assert_eq 0 "$rc" "no changed files, nothing to fail"
@@ -55,6 +55,23 @@ git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m new
 out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
 assert_eq 1 "$rc" "a new unlinked workaround fails the PR check"
 assert_eq "new.nix:1: workaround comment without a link" "$(head -1 <<<"$out")" "only the changed file is reported"
+
+# Modifying an unrelated line in a file that already carries old unlinked
+# workarounds (like nixpkgs' all-packages.nix) must not flag the untouched ones.
+sed -i 's/x = 1;/x = 42;/' "$repo/unlinked.nix"
+git -C "$repo" add unlinked.nix
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "touch unrelated line in unlinked.nix"
+out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 0 "$rc" "untouched pre-existing workarounds in a modified file are ignored"
+assert_eq "0 workaround comments, 0 without a link" "$(tail -1 <<<"$out")" "zero touched workaround blocks counted"
+
+# Editing inside an existing multi-line workaround block checks the whole block.
+sed -i 's/hangs in the sandbox./hangs in the sandbox;\n  # still needs investigation./' "$repo/unlinked.nix"
+git -C "$repo" add unlinked.nix
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m "touch existing workaround block"
+out=$("$tool" --base HEAD~1 "$repo" 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "editing an unlinked workaround block flags it"
+assert_eq "unlinked.nix:5: workaround comment without a link" "$(head -1 <<<"$out")" "reports the touched block's start line"
 
 echo "== references and the no-link marker"
 cat >"$repo/refs.nix" <<'NIX'
