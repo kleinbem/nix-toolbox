@@ -219,6 +219,22 @@ assert_eq 1 "$rc" "an unexplained-upstream skip fails"
 assert_eq "skips.nix:3: workaround comment without a link" "$(head -1 <<<"$out")" "a comment above --skip= needs a link"
 assert_eq "3 workaround comments, 1 without a link" "$(tail -1 <<<"$out")" "linked, no-link and plain comments are told apart"
 
+echo "== --base: a new skip under an old comment"
+printf '{\n  # Flaky on builders.\n  doCheck = true;\n}\n' >"$repo/oldcomment.nix"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m oldcomment
+sed -i 's/doCheck = true/doCheck = false/' "$repo/oldcomment.nix"
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -am skip
+out=$("$tool" --base HEAD~1 "$repo" -- oldcomment.nix 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "disabling the tests under an unchanged unlinked comment fails"
+assert_eq "oldcomment.nix:2: workaround comment without a link" "$(head -1 <<<"$out")" "reported at the comment"
+
+echo "== unquoted flags are commands, not test skips"
+printf '#!/bin/sh\n# Keep the archive small.\ntar --exclude=.git -cf x.tar .\n' >"$repo/pack.sh"
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- pack.sh 2>&1) && rc=0 || rc=$?
+assert_eq 0 "$rc" "a comment above tar --exclude is no workaround"
+
 echo "== more files than one command line takes"
 mkdir "$repo/many"
 for i in $(seq 1 4000); do printf '{ }\n' >"$repo/many/file-with-a-long-name-to-fill-the-argument-list-$i.nix"; done
