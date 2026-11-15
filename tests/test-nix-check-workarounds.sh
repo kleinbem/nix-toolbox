@@ -194,4 +194,39 @@ echo "== pathspec"
 out=$("$tool" "$repo" -- script.sh 2>&1) && rc=0 || rc=$?
 assert_eq 0 "$rc" "pathspec limits the files"
 
+echo "== test skips"
+cat >"$repo/skips.nix" <<'NIX'
+{
+  checkFlags = [
+    # Needs network access.
+    "--skip=net::fetches"
+    # Polls /bin/kill, which the sandbox lacks.
+    # upstream: block/buzz#9530
+    "--skip=proc::kill"
+  ];
+  cargoTestFlags = [
+    # no-link: only the CLI is installed.
+    "--exclude"
+    "xtask"
+  ];
+  # Ordinary comment above an ordinary line.
+  doCheck = true;
+}
+NIX
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- skips.nix 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "an unexplained-upstream skip fails"
+assert_eq "skips.nix:3: workaround comment without a link" "$(head -1 <<<"$out")" "a comment above --skip= needs a link"
+assert_eq "3 workaround comments, 1 without a link" "$(tail -1 <<<"$out")" "linked, no-link and plain comments are told apart"
+
+echo "== more files than one command line takes"
+mkdir "$repo/many"
+for i in $(seq 1 4000); do printf '{ }\n' >"$repo/many/file-with-a-long-name-to-fill-the-argument-list-$i.nix"; done
+printf '# workaround without a link\n{ }\n' >"$repo/many/zz-last.nix"
+git -C "$repo" add -A
+out=$( (ulimit -s 1024; "$tool" "$repo" -- 'many/*.nix') 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "every batch is scanned"
+assert_eq "many/zz-last.nix:1: workaround comment without a link" "$(head -1 <<<"$out")" "a workaround in a later batch is found"
+assert_empty "$(grep -i 'argument list too long' <<<"$out" || true)" "no ARG_MAX failure"
+
 test_summary
