@@ -118,8 +118,11 @@ scan() {
             announced = text ~ /(^|[^a-z0-9_])(workarounds?|work around|fixed upstream|until upstream|drop (it |this )?with|drop (it |this |them )?(once|when)|remove (it |this )?(once|when)|upstream (bugs?|issues?|fix(es)?)|a pr will follow)([^a-z0-9_]|$)/
             if (block != "" && in_hunks(bfile, start, skip ? FNR : end) && (skip || announced)) {
                 # A comment above a skip that gives a reason without announcing a
-                # workaround is enough: not every skip waits on upstream.
-                links = (skip && !announced) ? "reason" : ""
+                # workaround is enough: not every skip waits on upstream. A bare
+                # "#" gives none.
+                reason = block
+                gsub(/[#[:space:]]/, "", reason)
+                links = (skip && !announced && reason ~ /[[:alnum:]]/) ? "reason" : ""
                 rest = block
                 while (match(rest, /https?:\/\/[^ )>"'\''`]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+/)) {
                     links = links (links == "" ? "" : " ") substr(rest, RSTART, RLENGTH)
