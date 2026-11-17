@@ -208,6 +208,9 @@ cat >"$repo/skips.nix" <<'NIX'
     # no-link: only the CLI is installed.
     "--exclude"
     "xtask"
+    # Hangs on builders; drop once upstream fixes it.
+    "--exclude"
+    "flaky"
   ];
   # Ordinary comment above an ordinary line.
   doCheck = true;
@@ -215,12 +218,18 @@ cat >"$repo/skips.nix" <<'NIX'
 NIX
 git -C "$repo" add -A
 out=$("$tool" "$repo" -- skips.nix 2>&1) && rc=0 || rc=$?
-assert_eq 1 "$rc" "an unexplained-upstream skip fails"
-assert_eq "skips.nix:3: workaround comment without a link" "$(head -1 <<<"$out")" "a comment above --skip= needs a link"
-assert_eq "3 workaround comments, 1 without a link" "$(tail -1 <<<"$out")" "linked, no-link and plain comments are told apart"
+assert_eq 1 "$rc" "a skip that waits on upstream without a link fails"
+assert_eq "skips.nix:13: workaround comment without a link" "$(head -1 <<<"$out")" "a skip comment announcing a workaround needs a link"
+assert_empty "$(grep -F 'skips.nix:3:' <<<"$out" || true)" "a skip comment giving a reason passes"
+assert_eq "4 workaround comments, 1 without a link" "$(tail -1 <<<"$out")" "reason, linked, no-link and announced comments are told apart"
+
+printf '{\n  #\n  doCheck = false;\n}\n' >"$repo/bare.nix"
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- bare.nix 2>&1) && rc=0 || rc=$?
+assert_eq "bare.nix:2: workaround comment without a link" "$(head -1 <<<"$out")" "a bare # above a skip is no reason"
 
 echo "== --base: a new skip under an old comment"
-printf '{\n  # Flaky on builders.\n  doCheck = true;\n}\n' >"$repo/oldcomment.nix"
+printf '{\n  # Flaky on builders until upstream fixes it.\n  doCheck = true;\n}\n' >"$repo/oldcomment.nix"
 git -C "$repo" add -A
 git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m oldcomment
 sed -i 's/doCheck = true/doCheck = false/' "$repo/oldcomment.nix"

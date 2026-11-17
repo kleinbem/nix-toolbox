@@ -14,8 +14,9 @@
 # "work around", "fixed upstream", "until upstream", "drop with/once/when",
 # "remove once/when", "upstream bug/issue/fix" or "a PR will follow". It needs an
 # http(s) link or an owner/repo#123 reference in the same block, or "no-link: <why>".
-# So does a comment block right above a skipped test in a Nix list ("--skip=…",
-# "--exclude") or `doCheck = false`: the skip waits on an upstream fix too. Only
+# A comment block right above a skipped test in a Nix list ("--skip=…",
+# "--exclude") or `doCheck = false` passes with a reason ("needs network
+# access"), and needs a link only when it says one of those phrases. Only
 # quoted flags count, so `tar --exclude=.git` under a comment is not a skip.
 # Exit code 1 when one has no link, 2 on usage or git errors; --states only reports.
 set -euo pipefail
@@ -114,8 +115,14 @@ scan() {
             gsub(/nix-check-workarounds/, "", text) # the tool name itself
             # Whole words only: "upstream fixtures" and "drop them with mkForce"
             # are no workarounds.
-            if (block != "" && in_hunks(bfile, start, skip ? FNR : end) && (skip || text ~ /(^|[^a-z0-9_])(workarounds?|work around|fixed upstream|until upstream|drop (it |this )?with|drop (it |this |them )?(once|when)|remove (it |this )?(once|when)|upstream (bugs?|issues?|fix(es)?)|a pr will follow)([^a-z0-9_]|$)/)) {
-                links = ""
+            announced = text ~ /(^|[^a-z0-9_])(workarounds?|work around|fixed upstream|until upstream|drop (it |this )?with|drop (it |this |them )?(once|when)|remove (it |this )?(once|when)|upstream (bugs?|issues?|fix(es)?)|a pr will follow)([^a-z0-9_]|$)/
+            if (block != "" && in_hunks(bfile, start, skip ? FNR : end) && (skip || announced)) {
+                # A comment above a skip that gives a reason without announcing a
+                # workaround is enough: not every skip waits on upstream. A bare
+                # "#" gives none.
+                reason = block
+                gsub(/[#[:space:]]/, "", reason)
+                links = (skip && !announced && reason ~ /[[:alnum:]]/) ? "reason" : ""
                 rest = block
                 while (match(rest, /https?:\/\/[^ )>"'\''`]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+/)) {
                     links = links (links == "" ? "" : " ") substr(rest, RSTART, RLENGTH)
