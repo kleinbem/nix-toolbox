@@ -194,4 +194,64 @@ echo "== pathspec"
 out=$("$tool" "$repo" -- script.sh 2>&1) && rc=0 || rc=$?
 assert_eq 0 "$rc" "pathspec limits the files"
 
+echo "== test skips"
+cat >"$repo/skips.nix" <<'NIX'
+{
+  checkFlags = [
+    # Needs network access.
+    "--skip=net::fetches"
+    # Polls /bin/kill, which the sandbox lacks.
+    # upstream: block/buzz#9530
+    "--skip=proc::kill"
+  ];
+  cargoTestFlags = [
+    # no-link: only the CLI is installed.
+    "--exclude"
+    "xtask"
+    # Hangs on builders; drop once upstream fixes it.
+    "--exclude"
+    "flaky"
+  ];
+  # Ordinary comment above an ordinary line.
+  doCheck = true;
+}
+NIX
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- skips.nix 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "a skip that waits on upstream without a link fails"
+assert_eq "skips.nix:13: workaround comment without a link" "$(head -1 <<<"$out")" "a skip comment announcing a workaround needs a link"
+assert_empty "$(grep -F 'skips.nix:3:' <<<"$out" || true)" "a skip comment giving a reason passes"
+assert_eq "4 workaround comments, 1 without a link" "$(tail -1 <<<"$out")" "reason, linked, no-link and announced comments are told apart"
+
+printf '{\n  #\n  doCheck = false;\n}\n' >"$repo/bare.nix"
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- bare.nix 2>&1) && rc=0 || rc=$?
+assert_eq "bare.nix:2: workaround comment without a link" "$(head -1 <<<"$out")" "a bare # above a skip is no reason"
+
+echo "== --base: a new skip under an old comment"
+printf '{\n  # Flaky on builders until upstream fixes it.\n  doCheck = true;\n}\n' >"$repo/oldcomment.nix"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -m oldcomment
+sed -i 's/doCheck = true/doCheck = false/' "$repo/oldcomment.nix"
+git -C "$repo" -c user.email=t@t -c user.name=t commit -q -am skip
+out=$("$tool" --base HEAD~1 "$repo" -- oldcomment.nix 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "disabling the tests under an unchanged unlinked comment fails"
+assert_eq "oldcomment.nix:2: workaround comment without a link" "$(head -1 <<<"$out")" "reported at the comment"
+
+echo "== unquoted flags are commands, not test skips"
+printf '#!/bin/sh\n# Keep the archive small.\ntar --exclude=.git -cf x.tar .\n' >"$repo/pack.sh"
+git -C "$repo" add -A
+out=$("$tool" "$repo" -- pack.sh 2>&1) && rc=0 || rc=$?
+assert_eq 0 "$rc" "a comment above tar --exclude is no workaround"
+
+echo "== more files than one command line takes"
+mkdir "$repo/many"
+for i in $(seq 1 4000); do printf '{ }\n' >"$repo/many/file-with-a-long-name-to-fill-the-argument-list-$i.nix"; done
+printf '# workaround without a link\n{ }\n' >"$repo/many/zz-last.nix"
+git -C "$repo" add -A
+out=$( (ulimit -s 1024; "$tool" "$repo" -- 'many/*.nix') 2>&1) && rc=0 || rc=$?
+assert_eq 1 "$rc" "every batch is scanned"
+assert_eq "many/zz-last.nix:1: workaround comment without a link" "$(head -1 <<<"$out")" "a workaround in a later batch is found"
+assert_empty "$(grep -i 'argument list too long' <<<"$out" || true)" "no ARG_MAX failure"
+
 test_summary
