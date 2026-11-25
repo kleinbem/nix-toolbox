@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# nix-check-versions [dir] — detect version-pinning drift across a Nix
+# repo: the same package pinned to different versions in different files.
+# Matches any `<name>Version = "..."` assignment (e.g. platformToolsVersion,
+# python3Version); a plain `version = "..."` is not a pin it can group.
+set -euo pipefail
+
+dir="${1:-.}"
+[ -d "$dir" ] || { echo "nix-check-versions: not a directory: $dir" >&2; exit 2; }
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+
+# -o keeps only the "<name>Version = \"...\"" token, so the parsing below
+# starts at the identifier and a greedy `.*` can't eat into the name.
+# -Z ends the file name with NUL: a version like "1:2" has a colon too.
+grep -rEoZ '[a-zA-Z0-9_]+Version\s*=\s*"[0-9][^"]*"' "$dir" --include="*.nix" > "$tmp" || [ $? -eq 1 ]
+
+if [ ! -s "$tmp" ]; then
+    exit 0
+fi
+
+declare -A versions first_file
+drift_found=0
+
+while IFS= read -r -d '' file && IFS= read -r assignment; do
+    package=$(echo "$assignment" | sed -E 's/([a-zA-Z0-9_]+)Version.*/\1/')
+    version=$(echo "$assignment" | sed -E 's/.*"([^"]+)".*/\1/')
+
+    [ -z "$package" ] || [ -z "$version" ] && continue
+
+    if [ -v "versions[$package]" ] && [ "${versions[$package]}" != "$version" ]; then
+        if [ "$drift_found" -eq 0 ]; then
+            echo "❌ Version pinning drift detected:"
+            echo
+            drift_found=1
+        fi
+        echo "  Package: $package"
+        echo "    Pinned to ${versions[$package]} in: ${first_file[$package]}"
+        echo "    Pinned to $version in: $file"
+        echo
+    else
+        if [ ! -v "versions[$package]" ]; then
+            versions[$package]=$version
+            first_file[$package]=$file
+        fi
+    fi
+done < "$tmp"
+
+if [ "$drift_found" -eq 1 ]; then
+    echo "⚠️  Please update all occurrences to use the same version."
+    exit 1
+fi
+
+exit 0

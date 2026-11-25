@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# nix-audit-deps [repo-path] [old-lock-file] — compare watched nixpkgs package
+# versions between the nixpkgs revisions locked in two flake.lock files. Flags
+# major version bumps in common C libraries (ffmpeg, openssl, curl, ...) that
+# tend to break dependent packages. With no old-lock-file, just reports current
+# versions. It reads nixpkgs, not the repo's own overrides.
+set -euo pipefail
+
+REPO_PATH="${1:-.}"
+OLD_LOCK="${2:-}"
+
+if [ -n "$OLD_LOCK" ] && [ ! -f "$OLD_LOCK" ]; then
+    echo "❌ Old lock file not found: $OLD_LOCK" >&2
+    exit 2
+fi
+
+# Override with a space-separated list via WATCH_PACKAGES env var.
+read -ra WATCH_PACKAGES <<< "${WATCH_PACKAGES:-ffmpeg openssl curl zlib libpng libjpeg lua python3 perl postgresql libxml2}"
+
+get_nixpkgs_rev() {
+    local lock_file="$1"
+    [ -f "$lock_file" ] || return 1
+    jq -r '.nodes.nixpkgs.locked.rev // empty' "$lock_file" 2>/dev/null || echo ""
+}
+
+get_package_version() {
+    local pkg_name="$1" nixpkgs_rev="$2"
+    nix eval --raw "github:nixos/nixpkgs/$nixpkgs_rev#$pkg_name.version" 2>/dev/null || echo "unknown"
+}
+
+get_major_version() {
+    echo "$1" | cut -d. -f1
+}
+
+audit_transitive_deps() {
+    local repo_path="$1"
+    local lock_file="$repo_path/flake.lock"
+
+    if [ ! -f "$lock_file" ]; then
+        echo "❌ No flake.lock found at $lock_file"
+        return 1
+    fi
+
+    local current_rev
+    current_rev=$(get_nixpkgs_rev "$lock_file")
+
+    if [ -z "$current_rev" ]; then
+        echo "⚠️  Could not extract nixpkgs revision from flake.lock"
+        return 1
+    fi
+
+    local old_rev=""
+    if [ -n "$OLD_LOCK" ]; then
+        old_rev=$(get_nixpkgs_rev "$OLD_LOCK" || echo "")
+        if [ -z "$old_rev" ]; then
+            echo "⚠️  Could not extract nixpkgs revision from $OLD_LOCK"
+            return 1
+        fi
+    fi
+
+    echo "📦 Auditing transitive dependencies for: $(basename "$repo_path")"
+    echo "   nixpkgs rev: $current_rev"
+    echo
+
+    local has_changes=0 skipped=0
+
+    for pkg in "${WATCH_PACKAGES[@]}"; do
+        local current_version
+        current_version=$(get_package_version "$pkg" "$current_rev" || echo "")
+
+        if [ -z "$current_version" ] || [ "$current_version" = "unknown" ]; then
+            echo "  $pkg: version unknown at ${current_rev:0:12}, not checked" >&2
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        local current_major
+        current_major=$(get_major_version "$current_version")
+
+        if [ -n "$OLD_LOCK" ]; then
+            if [ "$old_rev" != "$current_rev" ]; then
+                local old_version
+                old_version=$(get_package_version "$pkg" "$old_rev" || echo "")
+
+                if [ -z "$old_version" ] || [ "$old_version" = "unknown" ]; then
+                    echo "  $pkg: version unknown at ${old_rev:0:12}, not compared" >&2
+                    skipped=$((skipped + 1))
+                else
+                    local old_major
+                    old_major=$(get_major_version "$old_version")
+
+                    if [ "$old_major" != "$current_major" ]; then
+                        echo "⚠️  $pkg: major version bump ($old_major → $current_major)"
+                        echo "   old: $old_version, new: $current_version"
+                        has_changes=1
+                    fi
+                fi
+            fi
+        else
+            echo "  $pkg: $current_version"
+        fi
+    done
+
+    if [ "$has_changes" -eq 1 ]; then
+        echo
+        echo "⚠️  ATTENTION: Major version changes detected in transitive deps"
+        echo "   Review build logs for compatibility issues."
+        return 1
+    fi
+
+    if [ "$skipped" -gt 0 ]; then
+        echo "⚠️  $skipped package check(s) skipped (version unknown); see above"
+        return 1
+    fi
+    echo "✓ No major version bumps detected"
+    return 0
+}
+
+audit_transitive_deps "$REPO_PATH"
